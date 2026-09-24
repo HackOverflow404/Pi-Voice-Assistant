@@ -32,7 +32,28 @@ Use a 64-bit OS (`uname -m` must report `aarch64`), preferably a Pi 4/5 with at
 least 2 GB RAM, and several GB free during setup. Copy this entire project to
 the Pi. Run scripts as your normal login user; privileged package/linger
 commands use `pkexec`. A headless Pi needs a working polkit authentication agent
-in that login session (for example `pkttyagent`); do not run the whole setup as root.
+in that login session; do not run the whole setup as root.
+
+If authentication fails with **“No session for cookie”**, the polkit authentication
+exchange failed; this message alone does not establish that the password was wrong.
+Use an external terminal agent:
+
+```sh
+./setup.sh --external-agent
+```
+
+The script prints `pkttyagent --process NUMBER`. Run that exact command in a
+second terminal/SSH session on the same machine, logged in as the same user.
+Leave the agent running, then press Enter in the setup terminal. Enter the
+password in the **agent terminal** when prompted. After setup exits, stop the
+agent with Ctrl+C. Use `./install --external-agent` the same way for the later
+`loginctl enable-linger` step; it prints a new process number.
+See [pkttyagent's manual](https://manpages.debian.org/trixie/polkitd/pkttyagent.1.en.html).
+
+If packages have already been installed separately, `./setup.sh --runtime-only`
+skips the privileged package steps. It still creates the runtime and downloads
+models. This does not fix a broken polkit daemon; if the external agent also
+fails, inspect `journalctl -b -u polkit --no-pager` on the target machine.
 
 ```sh
 cd pi-voice-assistant

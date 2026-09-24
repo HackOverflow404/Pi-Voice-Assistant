@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+case ${1:-} in
+  ''|--external-agent) ;;
+  *) echo 'Usage: ./install [--external-agent]' >&2; exit 2 ;;
+esac
+source "$source_dir/scripts/polkit.sh"
 live="$HOME/.local/share/pi-voice-assistant"
 unit="$HOME/.config/systemd/user/pi-voice-assistant.service"
 echo "Installing copies to $live and $unit; enabling user-service boot via loginctl linger."
@@ -9,6 +14,7 @@ echo 'No files in the source project will be moved.'
 [[ -f "$source_dir/config.yaml" && -f "$source_dir/models/custom.onnx" ]] || {
   echo 'Run setup.sh, edit config.yaml, and supply models/custom.onnx first.' >&2; exit 1;
 }
+if [[ ${1:-} == --external-agent ]]; then prepare_external_agent; fi
 systemctl --user stop pi-voice-assistant.service 2>/dev/null || true
 mkdir -p "$live" "$(dirname "$unit")" "$live/state"
 chmod 700 "$live" "$live/state"
@@ -27,6 +33,6 @@ PYTHONPATH="$live/server" "$live/.venv/bin/python" -m voice_assistant.app --conf
 [[ ! -f "$unit" ]] || cp -a "$unit" "$unit.$(date +%Y%m%d-%H%M%S).bak"
 install -m 644 "$source_dir/systemd/pi-voice-assistant.service" "$unit"
 systemctl --user daemon-reload
-pkexec loginctl enable-linger "$(id -un)"
+run_privileged loginctl enable-linger "$(id -un)"
 systemctl --user enable --now pi-voice-assistant.service
 systemctl --user --no-pager status pi-voice-assistant.service

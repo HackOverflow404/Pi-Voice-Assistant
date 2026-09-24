@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+case ${1:-} in
+  ''|--runtime-only|--external-agent) ;;
+  *) echo 'Usage: ./setup.sh [--external-agent | --runtime-only]' >&2; exit 2 ;;
+esac
+source scripts/polkit.sh
+if [[ $(uname -m) != aarch64 && ${ALLOW_OTHER_ARCH:-0} != 1 ]]; then
+  echo 'Expected ARM64 (aarch64). Use 64-bit Debian; ALLOW_OTHER_ARCH=1 allows development hosts.' >&2
+  exit 1
+fi
 if [[ ${1:-} != --runtime-only ]]; then
   echo 'Pi setup will install Debian packages with pkexec, download models into this project,'
   echo 'and create local Python environments. It does not install or start the service.'
   if ! command -v apt-get >/dev/null; then
     echo 'Run this script on Debian / Raspberry Pi OS (64-bit).' >&2; exit 1
   fi
-  pkexec apt-get update
-  pkexec apt-get install -y python3 python3-venv ca-certificates curl unzip libgomp1
-fi
-if [[ $(uname -m) != aarch64 && ${ALLOW_OTHER_ARCH:-0} != 1 ]]; then
-  echo 'Expected ARM64 (aarch64). Use 64-bit Debian; ALLOW_OTHER_ARCH=1 allows development hosts.' >&2
-  exit 1
+  if [[ ${1:-} == --external-agent ]]; then prepare_external_agent; fi
+  run_privileged apt-get update
+  run_privileged apt-get install -y python3 python3-venv ca-certificates curl unzip libgomp1
 fi
 # A local managed 3.11 runtime also supports Debian releases whose default is 3.13+.
 python3 -m venv .bootstrap
