@@ -1,0 +1,6 @@
+# openWakeWord's upstream metadata requires tflite-runtime even for ONNX.
+# Install openwakeword with --no-deps, and explicitly provide its ONNX dependencies.
+scipy==1.14.1
+scikit-learn==1.6.1
+requests==2.32.4
+tqdm==4.67.1

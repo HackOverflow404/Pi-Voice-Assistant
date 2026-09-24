@@ -1,0 +1,29 @@
+server:
+  host: 0.0.0.0
+  port: 8765
+  token: REPLACE_WITH_RANDOM_TOKEN_AT_LEAST_32_CHARACTERS
+  # Optional TLS. Both paths must be set together; Android must trust the CA.
+  tls_cert: null
+  tls_key: null
+models:
+  wake: models/custom.onnx
+  vosk: models/vosk-model-small-en-us-0.15
+  piper: models/en_US-amy-low.onnx
+audio:
+  wake_threshold: 0.5
+  speech_rms: 450
+  silence_seconds: 1.0
+  start_timeout_seconds: 5.0
+  max_utterance_seconds: 20.0
+mail:
+  username: your-account@gmail.com
+  app_password: REPLACE_WITH_GMAIL_APP_PASSWORD
+  recipient: medhanshgarg@mail.instinct.com
+  smtp_host: smtp.gmail.com
+  smtp_port: 465
+  imap_host: imap.gmail.com
+  imap_port: 993
+  mailbox: INBOX
+  reply_timeout_seconds: 180
+  max_reply_chars: 4000
+state_dir: state

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+live="$HOME/.local/share/pi-voice-assistant"
+unit="$HOME/.config/systemd/user/pi-voice-assistant.service"
+echo "Installing copies to $live and $unit; enabling user-service boot via loginctl linger."
+echo 'No files in the source project will be moved.'
+[[ "$source_dir" != "$live" ]] || { echo 'Run install from the source checkout.' >&2; exit 1; }
+[[ -f "$source_dir/config.yaml" && -f "$source_dir/models/custom.onnx" ]] || {
+  echo 'Run setup.sh, edit config.yaml, and supply models/custom.onnx first.' >&2; exit 1;
+}
+systemctl --user stop pi-voice-assistant.service 2>/dev/null || true
+mkdir -p "$live" "$(dirname "$unit")" "$live/state"
+chmod 700 "$live" "$live/state"
+for name in server scripts models systemd; do
+  mkdir -p "$live/$name"
+  cp -a "$source_dir/$name/." "$live/$name/"
+done
+cp "$source_dir/setup.sh" "$source_dir/config.example.yaml" "$live/"
+if [[ ! -f "$live/config.yaml" ]]; then
+  install -m 600 "$source_dir/config.yaml" "$live/config.yaml"
+else
+  echo "Keeping existing $live/config.yaml (edit this file for configuration updates)."
+fi
+(cd "$live" && bash setup.sh --runtime-only)
+PYTHONPATH="$live/server" "$live/.venv/bin/python" -m voice_assistant.app --config "$live/config.yaml" --check
+[[ ! -f "$unit" ]] || cp -a "$unit" "$unit.$(date +%Y%m%d-%H%M%S).bak"
+install -m 644 "$source_dir/systemd/pi-voice-assistant.service" "$unit"
+systemctl --user daemon-reload
+pkexec loginctl enable-linger "$(id -un)"
+systemctl --user enable --now pi-voice-assistant.service
+systemctl --user --no-pager status pi-voice-assistant.service

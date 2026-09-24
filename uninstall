@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+live="$HOME/.local/share/pi-voice-assistant"
+unit="$HOME/.config/systemd/user/pi-voice-assistant.service"
+echo "Stopping/disabling service and removing $unit and installed code/runtime under $live."
+echo 'Preserving config.yaml, models/, state/, and loginctl linger for other user services.'
+systemctl --user disable --now pi-voice-assistant.service 2>/dev/null || true
+rm -f -- "$unit"
+systemctl --user daemon-reload
+for name in server scripts systemd .venv .bootstrap .python .uv-cache setup.sh config.example.yaml; do
+  rm -rf -- "$live/$name"
+done

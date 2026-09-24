@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Permits adb dpm remove-active-admin after device-owner testing. Install with adb -t. -->
+    <application android:testOnly="true" />
+</manifest>
