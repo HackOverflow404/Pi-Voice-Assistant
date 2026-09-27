@@ -24,7 +24,8 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 - `models/`: custom wake classifier plus downloaded Vosk / Piper models.
 - `setup.sh`: Debian packages, isolated Python 3.11 runtime, dependencies, model downloads.
 - `install`, `uninstall`: install/remove separate live copies and a systemd user unit.
-- `build-apk.sh`: checked Gradle distribution download, APK build, Android lint.
+- `build-apk.sh`: checked Gradle distribution download, APK build, Android lint (refuses to run on the Pi).
+- `deploy-apk.sh`: build on the dev machine, copy to the Pi, install on the Echo via the Pi's adb.
 
 ## Pi setup (ARM64 Debian / Raspberry Pi OS)
 
@@ -155,6 +156,17 @@ If using project-local tools, the script recognizes `.tools/jdk` and
 to update the same installation. The output is a debug-signed, test-only sideload APK,
 not a Play Store release. `lintDebug` runs as part of the build.
 
+**Do not build on the Pi.** Gradle and lint exhaust a 2 GB Pi and leave it
+unresponsive, so `build-apk.sh` refuses to run on ARM or on hosts with less than 4 GB
+RAM (`FORCE_LOCAL_BUILD=1` overrides). When the Echo is attached to the Pi by USB,
+build on the development machine and install through the Pi's adb:
+
+```sh
+./deploy-apk.sh              # build, scp to $PI_HOST:$PI_DIR/dist, adb install, launch
+./deploy-apk.sh --no-build   # redeploy the existing dist/ APK
+# Defaults: PI_HOST=tps-l2 PI_DIR=HAL
+```
+
 ## Install on Echo Show 5 / LineageOS (Android 11–13)
 
 LineageOS must already be installed and its microphone/speaker drivers working.
@@ -270,7 +282,7 @@ Lightweight server tests don't require speech models or Gmail credentials:
 python3 -m venv .test-venv
 .test-venv/bin/pip install PyYAML==6.0.2 websockets==15.0.1 IMAPClient==3.0.1
 PYTHONPATH=server .test-venv/bin/python -m unittest discover -s server/tests -v
-bash -n setup.sh install uninstall build-apk.sh
+bash -n setup.sh install uninstall build-apk.sh deploy-apk.sh
 ```
 
 Tests cover fragmented PCM, silence/max-duration endpointing, exact email

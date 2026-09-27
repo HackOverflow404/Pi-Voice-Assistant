@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+# Gradle + lint exhaust a 2 GB Pi and make it unresponsive; build elsewhere and use deploy-apk.sh.
+mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [[ ( $(uname -m) == aarch64 || $mem_kb -lt 4000000 ) && ${FORCE_LOCAL_BUILD:-0} != 1 ]]; then
+  echo 'Refusing to build on this host (ARM or <4 GB RAM). Build on a development machine' >&2
+  echo 'and run ./deploy-apk.sh there. FORCE_LOCAL_BUILD=1 overrides.' >&2
+  exit 1
+fi
 mkdir -p .tools dist
 export GRADLE_USER_HOME="$PWD/.tools/gradle-home"
 export ANDROID_USER_HOME="$PWD/.tools/android-user"
