@@ -11,7 +11,7 @@ import ssl
 import threading
 import time
 
-from .audio import FRAME_SECONDS, Capture, Framer, rms, speech_threshold
+from .audio import FRAME_SECONDS, Capture, Framer, normalize, rms, speech_threshold
 from .mail import Mail
 from .store import Store
 
@@ -205,7 +205,7 @@ class Session:
             pcm, capture = capture.pcm, None
             try:
                 await self.set_status('transcribing')
-                self.transcript = await self.blocking(self.engines.transcribe, pcm) if pcm else ''
+                self.transcript = await self.blocking(self.transcribe, pcm) if pcm else ''
                 if not self.transcript:
                     await self.set_status('idle', 'No speech recognized; say the wake phrase again')
                     continue
@@ -222,6 +222,12 @@ class Session:
                 await self.set_status('idle', f'{type(exc).__name__}: request failed; check mail/network')
             finally:
                 self.flush()
+
+    def transcribe(self, pcm):
+        pcm, gain = normalize(pcm)
+        text = self.engines.transcribe(pcm)
+        LOG.info('Transcribed %.1f s at gain %.1fx: %d words', len(pcm) / 32000, gain, len(text.split()))
+        return text
 
     async def telemetry(self):
         while True:

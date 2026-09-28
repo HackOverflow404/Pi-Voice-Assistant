@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from voice_assistant.audio import Capture, Framer, FRAME_BYTES, speech_threshold
+from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
 from voice_assistant.app import Session, system_stats
 from voice_assistant.mail import Mail, plain_reply
 from voice_assistant.store import Store
@@ -59,7 +59,18 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(speech_threshold(AUDIO, [600], [50] * 10), 180)    # quiet mic
         self.assertEqual(speech_threshold(AUDIO, [3000], [50] * 10), 450)   # capped by config
         self.assertEqual(speech_threshold(AUDIO, [600], [120] * 10), 300)   # above the noise floor
-        self.assertEqual(speech_threshold(AUDIO, [], []), 100)              # never below 100
+        self.assertEqual(speech_threshold(AUDIO, [], []), 30)               # never below 30
+        self.assertAlmostEqual(speech_threshold(AUDIO, [102], [6] * 10), 30.6)  # measured Echo levels
+
+    def test_normalize_boosts_quiet_and_leaves_loud(self):
+        quiet = struct.pack('<1280h', *([150] * 1280))
+        boosted, gain = normalize(quiet)
+        self.assertAlmostEqual(gain, 4000 / 150)
+        self.assertAlmostEqual(rms(boosted), 4000, delta=30)
+        loud = struct.pack('<1280h', *([5000] * 1280)) + SILENCE
+        self.assertEqual(normalize(loud), (loud, 1.0))  # already loud enough
+        self.assertEqual(normalize(SILENCE), (SILENCE, 1.0))
+        self.assertEqual(normalize(struct.pack('<1280h', *([10] * 1280)))[1], 40.0)  # gain is capped
 
     def test_quiet_speech_counts_with_lower_threshold(self):
         quiet = struct.pack('<1280h', *([300] * 1280))

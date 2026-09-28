@@ -13,12 +13,10 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -33,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -118,7 +117,8 @@ fun GlanceDashboard(
         else if (conversation) { delay(20_000); conversation = false }
     }
     val colors = palette(now, weather)
-    Box(Modifier.fillMaxSize().drawBehind {
+    // No settings button on the display; a long press anywhere opens the connection settings.
+    Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { onSettings() }) }.drawBehind {
         drawRect(Brush.verticalGradient(listOf(colors.top, colors.bottom)))
         val glowA = Offset(size.width * 0.82f, size.height * 0.05f)
         drawCircle(Brush.radialGradient(listOf(colors.glowA.copy(alpha = 0.38f), Color.Transparent), glowA, size.width * 0.5f),
@@ -150,7 +150,7 @@ fun GlanceDashboard(
                     }
                 }
                 Spacer(Modifier.height(14.dp))
-                StatusBar(state, now, onSettings)
+                StatusBar(state, now)
             }
         }
     }
@@ -360,7 +360,7 @@ private fun Dot(color: Color, pulse: Boolean) {
 }
 
 @Composable
-private fun StatusBar(state: Dashboard, now: LocalDateTime, onSettings: () -> Unit) {
+private fun StatusBar(state: Dashboard, now: LocalDateTime) {
     val (voice, voiceColor) = when {
         !state.running -> "Voice off" to Red
         state.connection != "Connected" -> state.connection to Amber
@@ -368,28 +368,25 @@ private fun StatusBar(state: Dashboard, now: LocalDateTime, onSettings: () -> Un
         state.status == "idle" -> "Say “Hey Clippy”" to Accent
         else -> state.status.replaceFirstChar { it.uppercase() } to Accent
     }
+    // The right edge lines up with the agenda card above: same 28 dp gap, same 320 dp width.
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Row(Modifier.weight(1f, fill = false).pill(), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.weight(1f)) { Row(Modifier.pill(), verticalAlignment = Alignment.CenterVertically) {
             Dot(voiceColor, pulse = state.running && state.connection == "Connected" && state.status != "idle")
             Spacer(Modifier.width(8.dp))
             Text(voice, color = Soft, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1,
                 overflow = TextOverflow.Ellipsis)
-        }
-        Spacer(Modifier.weight(1f))
-        PiPill(state.pi, state.connection == "Connected", now)
-        Spacer(Modifier.width(8.dp))
-        Box(Modifier.size(38.dp).clip(CircleShape).background(Glass).border(1.dp, GlassEdge, CircleShape)
-            .clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = Faint, modifier = Modifier.size(20.dp))
-        }
+        } }
+        Spacer(Modifier.width(28.dp))
+        PiPill(state.pi, state.connection == "Connected", now, Modifier.width(320.dp))
     }
 }
 
 @Composable
-private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime) {
+private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime, modifier: Modifier) {
     val nowMs = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
     val fresh = pi != null && connected && nowMs - pi.receivedAt < 90_000
-    Row(Modifier.pill(), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier.pill(), verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween) {
         if (!fresh) {
             Dot(Red, pulse = false)
             Spacer(Modifier.width(8.dp))
@@ -397,14 +394,14 @@ private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime) {
             return@Row
         }
         val strained = (pi!!.memAvailableMb ?: Int.MAX_VALUE) < 300 || (pi.tempC ?: 0.0) >= 75
-        Dot(if (strained) Amber else Accent, pulse = false)
-        Spacer(Modifier.width(8.dp))
-        Text("Pi", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        val parts = listOfNotNull(
-            pi.tempC?.let { "${it.roundToInt()}°C" },
-            pi.memAvailableMb?.let { if (it >= 1024) "%.1f GB free".format(it / 1024.0) else "$it MB free" },
-            pi.load1?.let { "load %.1f".format(it) },
-        )
-        Text("   " + parts.joinToString("   "), color = Soft, fontSize = 16.sp)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Dot(if (strained) Amber else Accent, pulse = false)
+            Spacer(Modifier.width(8.dp))
+            Text("Pi", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        }
+        pi.tempC?.let { Text("${it.roundToInt()}°C", color = Soft, fontSize = 16.sp) }
+        pi.memAvailableMb?.let { Text(if (it >= 1024) "%.1f GB free".format(it / 1024.0) else "$it MB free",
+            color = Soft, fontSize = 16.sp) }
+        pi.load1?.let { Text("load %.1f".format(it), color = Soft, fontSize = 16.sp) }
     }
 }

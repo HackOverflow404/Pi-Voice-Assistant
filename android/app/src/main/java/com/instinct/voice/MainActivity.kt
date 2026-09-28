@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.OneShotPreDrawListener
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -47,17 +48,21 @@ class MainActivity : ComponentActivity() {
     // Without device ownership, Android 11+ blocks microphone services started from the
     // background, so the Pi's adb watcher restarts the service through this visible activity.
     // It only resumes a service the user already started; Stop still disables it.
-    private fun handleStart(intent: Intent?) {
+    // On a cold launch the first frame can take over 10 s on the Echo (after an install or
+    // boot), and a foreground service must call startForeground() within that window on the
+    // same main thread, so wait until the dashboard has drawn before starting it.
+    private fun handleStart(intent: Intent?, afterFirstFrame: Boolean) {
         if (intent?.action != ACTION_START) return
         val settings = Settings(this)
         if (!settings.enabled || settings.token.isBlank() || ContextCompat.checkSelfPermission(this,
                 Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
-        startVoice()
+        if (!afterFirstFrame) startVoice()
+        else OneShotPreDrawListener.add(window.decorView) { window.decorView.post { startVoice() } }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleStart(intent)
+        handleStart(intent, afterFirstFrame = false)
     }
 
     override fun onResume() {
@@ -87,7 +92,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val settings = Settings(this)
-        handleStart(intent)
+        handleStart(intent, afterFirstFrame = true)
         calendarAllowed = Glance.canReadCalendar(this)
         setContent {
             val state by State.flow.collectAsStateWithLifecycle()

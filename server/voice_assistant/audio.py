@@ -1,4 +1,5 @@
 """16 kHz, mono, signed little-endian PCM framing and endpoint detection."""
+from array import array
 import math
 import struct
 
@@ -28,10 +29,22 @@ def rms(frame):
 def speech_threshold(config, wake_levels, idle_levels):
     """Speech level scaled to how loudly the wake phrase was just said: the request
     follows at the same distance and volume, and mic gain varies by device. Kept above
-    the room's noise floor, never below 100, and capped by config speech_rms."""
+    the room's noise floor, never below 30, and capped by config speech_rms."""
     peak = max(wake_levels, default=0.0)
     noise = sorted(idle_levels)[len(idle_levels) // 5] if idle_levels else 0.0
-    return min(config['speech_rms'], max(0.3 * peak, 2.5 * noise, 100.0))
+    return min(config['speech_rms'], max(0.3 * peak, 2.5 * noise, 30.0))
+
+
+def normalize(pcm, target=4000.0, max_gain=40.0):
+    """Boost a quiet recording so its loudest 80 ms frame reaches about `target` RMS.
+    Some microphones (the Echo's VOICE_RECOGNITION source) deliver speech near -50 dBFS,
+    where Vosk drops words. Assumes a little-endian host, like the PCM itself."""
+    peak = max((rms(pcm[i:i + FRAME_BYTES]) for i in range(0, len(pcm), FRAME_BYTES)), default=0.0)
+    gain = min(max_gain, target / peak) if peak else 1.0
+    if gain <= 1.0:
+        return pcm, 1.0
+    boosted = array('h', (max(-32768, min(32767, int(x * gain))) for x in array('h', pcm)))
+    return boosted.tobytes(), gain
 
 
 class Capture:
