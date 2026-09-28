@@ -228,6 +228,11 @@ class WhatsAppTests(unittest.TestCase):
         self.assertEqual(self.client.send('What is due?'), {'id': 'ABC', 'timestamp': 1000})
         self.assertEqual(FakeBridge.sent, [{'contact': 'Instinct', 'text': 'What is due?'}])
 
+    def test_send_appends_instruction(self):
+        self.client.config['instruction'] = '(Reply in full sentences.)'
+        self.client.send('What is due?')
+        self.assertEqual(FakeBridge.sent[-1]['text'], 'What is due?\n\n(Reply in full sentences.)')
+
     def test_joins_multi_bubble_reply_and_ignores_older_messages(self):
         FakeBridge.replies = [dict(seq=1, timestamp=990, text='Old answer'),
                               dict(seq=2, timestamp=1001, text='Two things are due.'),

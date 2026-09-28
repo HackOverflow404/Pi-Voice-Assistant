@@ -27,6 +27,8 @@ whatsapp:
   # Replies split across several messages are joined if each follows within this time.
   reply_settle_seconds: 3
   max_reply_chars: 4000
+  # Appended to every spoken request so the reply reads well aloud. Empty to send the words only.
+  instruction: "(Spoken request; your reply will be read aloud by text-to-speech. Answer in plain, complete sentences. Write every word out in full: no abbreviations, symbols, emoji, lists or formatting. Write times, dates, and room, course and other numbers the way a person would say them aloud, for example 'eleven fifty-nine PM', 'Siebel twenty-four oh seven A' and 'E C E two ten'.)"
 tts:
   # piper: local voice (models.piper). deepgram: Aura-2 cloud voices, far more natural and
   # no load on the Pi, but reply text is sent to Deepgram. Piper remains the fallback.

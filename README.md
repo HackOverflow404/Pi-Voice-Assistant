@@ -161,7 +161,9 @@ replies count only until you send anything else in that chat, and not at all if 
 previous message there was still unanswered when the request went out (Instinct's next
 message probably answers that). When in doubt it stays silent and reports no reply.
 Answers split across several messages are joined if each follows within
-`reply_settle_seconds`. The reply is cleaned for speech (sign-off,
+`reply_settle_seconds`. Every request ends with `whatsapp.instruction`, which asks for plain,
+unabbreviated sentences with times and room and course numbers written as spoken, since
+the reply is read aloud. The reply is cleaned for speech (sign-off,
 formatting marks, emoji and links removed) and spoken one sentence at a time, so
 playback starts after the first sentence is synthesized. Unlinking the device on the
 phone logs the bridge out; pair again to restore it.

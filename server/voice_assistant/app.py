@@ -40,6 +40,7 @@ def load_config(path):
             0 < a['start_timeout_seconds'] <= a['max_utterance_seconds']):
         raise ValueError('Invalid audio thresholds or durations')
     w = c['whatsapp']
+    w.setdefault('instruction', '')
     if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
         raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')

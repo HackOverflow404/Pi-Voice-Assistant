@@ -24,8 +24,11 @@ class WhatsApp:
             raise RuntimeError(f'WhatsApp bridge {exc.code}: {detail}') from exc
 
     def send(self, text):
-        """Send `text` to the contact; returns WhatsApp's {"id", "timestamp"} for it."""
-        return self.call('POST', '/send', {'contact': self.config['contact'], 'text': text}, timeout=30)
+        """Send the spoken request, followed by the configured instruction that the reply
+        will be read aloud; returns WhatsApp's {"id", "timestamp"} for the message."""
+        instruction = (self.config.get('instruction') or '').strip()
+        body = f'{text}\n\n{instruction}' if instruction else text
+        return self.call('POST', '/send', {'contact': self.config['contact'], 'text': body}, timeout=30)
 
     def wait_reply(self, request, since, deadline, stop):
         """The contact's answer to message `request`. The chat also carries unrelated
