@@ -49,6 +49,10 @@ def load_config(path):
     return c
 
 
+class NoReply(Exception):
+    """No matching email reply arrived before the request deadline."""
+
+
 def system_stats():
     """Pi health for the dashboard; any unreadable source is omitted."""
     stats = {}
@@ -150,10 +154,18 @@ class Session:
         self.playback_id = None
         self.store.update(self.message_id, 'done')
 
+    def no_reply_message(self):
+        seconds = self.config['mail']['reply_timeout_seconds']
+        return f'No email reply within {seconds // 60} min' if seconds >= 60 else f'No email reply within {seconds} s'
+
     async def wait_and_speak(self, created):
         await self.set_status('waiting')
-        self.reply = await self.blocking(self.mail.wait_reply, self.message_id,
-                                        created + self.config['mail']['reply_timeout_seconds'], self.stop)
+        try:
+            self.reply = await self.blocking(self.mail.wait_reply, self.message_id,
+                                            created + self.config['mail']['reply_timeout_seconds'], self.stop)
+        except TimeoutError as exc:
+            self.store.update(self.message_id, 'expired')
+            raise NoReply from exc
         self.store.update(self.message_id, 'replied', self.reply)
         await self.speak(self.reply)
 
@@ -163,7 +175,11 @@ class Session:
             return
         self.message_id = latest['message_id']
         self.transcript, self.reply = latest['transcript'], latest['reply']
-        if latest['status'] in ('sending', 'sent'):
+        expired = time.time() >= latest['created'] + self.config['mail']['reply_timeout_seconds']
+        if latest['status'] in ('sending', 'sent') and expired:
+            # Past its deadline (e.g. the client was away): close it out instead of retrying.
+            self.store.update(self.message_id, 'expired')
+        elif latest['status'] in ('sending', 'sent'):
             # A crash between SMTP acceptance and commit is ambiguous. Watch the saved ID;
             # never resend automatically, which could cause duplicate external actions.
             await self.wait_and_speak(latest['created'])
@@ -173,6 +189,8 @@ class Session:
     async def process(self):
         try:
             await self.recover()
+        except NoReply:
+            await self.set_status('idle', self.no_reply_message())
         except Exception as exc:
             LOG.warning('Recovery failed: %s', type(exc).__name__)
             await self.set_status('idle', f'Recovery failed: {type(exc).__name__}')
@@ -217,6 +235,9 @@ class Session:
                 self.store.update(self.message_id, 'sent')
                 await self.wait_and_speak(self.store.latest()['created'])
                 await self.set_status('idle')
+            except NoReply:
+                LOG.info('No reply to %s before the deadline', self.message_id)
+                await self.set_status('idle', self.no_reply_message())
             except Exception as exc:
                 LOG.warning('Request failed: %s', type(exc).__name__)
                 await self.set_status('idle', f'{type(exc).__name__}: request failed; check mail/network')

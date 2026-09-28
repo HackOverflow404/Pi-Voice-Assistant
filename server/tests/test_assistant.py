@@ -220,6 +220,17 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.session.transcript, 'Existing request')
 
+    async def test_expired_request_is_closed_not_retried(self):
+        self.store.create('<old@test>', 'Old request')
+        self.store.update('<old@test>', 'sent')
+        self.store.db.execute('UPDATE requests SET created = created - 3600')
+        self.store.db.commit()
+        self.session.mail.wait_reply = lambda *args: self.fail('expired request was retried')
+        self.task = asyncio.create_task(self.session.run())
+        events = await self.until('idle')
+        self.assertIsNone(events[-1]['error'])
+        self.assertEqual(self.store.latest()['status'], 'expired')
+
     async def test_silent_capture_does_not_send_mail(self):
         self.task = asyncio.create_task(self.session.run())
         await self.until('idle')
@@ -267,7 +278,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.session.mail.wait_reply = timeout
         self.task = asyncio.create_task(self.session.run())
         events = await self.until('idle')
-        self.assertIn('TimeoutError', events[-1]['error'])
+        self.assertEqual(events[-1]['error'], 'No email reply within 10 s')
+        self.assertEqual(self.store.latest()['status'], 'expired')
         self.assertEqual(self.sent, [])
 
 
