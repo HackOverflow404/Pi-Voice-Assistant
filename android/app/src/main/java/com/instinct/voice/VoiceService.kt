@@ -2,8 +2,10 @@ package com.instinct.voice
 
 import android.Manifest
 import android.app.*
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.*
 import android.os.IBinder
@@ -23,7 +25,7 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 /** One synthesized sentence of a reply; the server marks the reply's final segment. */
-private class Segment(val file: File, val id: String, val last: Boolean)
+private class Segment(val file: File, val id: String, val last: Boolean, val volume: Float)
 
 private sealed interface Incoming {
     data object Open : Incoming
@@ -41,6 +43,28 @@ class VoiceService : Service() {
     @Volatile private var muted = true
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // Media volume stays at maximum so Bluetooth sources (which scale their own audio) get
+    // the full speaker range; the assistant's speech is attenuated per player instead.
+    private val audio by lazy { getSystemService(AudioManager::class.java) }
+    private val volumeWatcher = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.getIntExtra(EXTRA_VOLUME_STREAM, -1) == AudioManager.STREAM_MUSIC) pinMediaVolume()
+        }
+    }
+
+    private fun pinMediaVolume() {
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != max) {
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        registerReceiver(volumeWatcher, IntentFilter(VOLUME_CHANGED))
+        pinMediaVolume()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "STOP") {
@@ -119,6 +143,7 @@ class VoiceService : Service() {
         var output: FileOutputStream? = null
         var audioId: String? = null
         var last = true
+        var volume = 1f
         var expected = 0L
         var received = 0L
         // Replies arrive one sentence at a time; play each as soon as it is complete while
@@ -128,7 +153,7 @@ class VoiceService : Service() {
             var failedId: String? = null
             for (segment in segments) {
                 try {
-                    if (failedId != segment.id) play(segment.file)
+                    if (failedId != segment.id) play(segment.file, segment.volume)
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (_: Exception) {
@@ -164,6 +189,7 @@ class VoiceService : Service() {
                                 check(output == null) { "Overlapping audio transfer" }
                                 audioId = json.getString("id")
                                 last = json.optBoolean("last", true)
+                                volume = json.optDouble("volume", 1.0).toFloat().coerceIn(0f, 1f)
                                 expected = json.getLong("bytes")
                                 check(expected in 44..(32L * 1024 * 1024)) { "Invalid WAV size" }
                                 received = 0
@@ -175,7 +201,7 @@ class VoiceService : Service() {
                                     "Incomplete WAV transfer"
                                 }
                                 output?.close(); output = null
-                                segments.send(Segment(file!!, audioId!!, last))
+                                segments.send(Segment(file!!, audioId!!, last, volume))
                                 file = null
                                 audioId = null
                             }
@@ -229,7 +255,7 @@ class VoiceService : Service() {
         }
     }
 
-    private suspend fun play(file: File) {
+    private suspend fun play(file: File, volume: Float) {
         val manager = getSystemService(AudioManager::class.java)
         val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
@@ -244,6 +270,7 @@ class VoiceService : Service() {
             check(manager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "Audio focus unavailable" }
             player.setAudioAttributes(attributes)
             player.setDataSource(file.absolutePath)
+            player.setVolume(volume, volume)
             player.prepare()
             val completed = withTimeoutOrNull(player.duration.toLong() + 10000) {
                 suspendCancellableCoroutine<Unit> { continuation ->
@@ -264,6 +291,7 @@ class VoiceService : Service() {
     }
 
     override fun onDestroy() {
+        unregisterReceiver(volumeWatcher)
         socket?.cancel()
         scope.cancel()
         runner?.invokeOnCompletion {
@@ -279,6 +307,9 @@ class VoiceService : Service() {
 
     companion object {
         private const val CHANNEL = "voice"
+        // Hidden AudioManager broadcast and extra, sent whenever a stream's volume changes.
+        private const val VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
+        private const val EXTRA_VOLUME_STREAM = "android.media.EXTRA_VOLUME_STREAM_TYPE"
         private fun ensureChannel(context: Context) {
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL, "Voice assistant", NotificationManager.IMPORTANCE_LOW))

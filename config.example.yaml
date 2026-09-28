@@ -36,6 +36,15 @@ tts:
   deepgram_api_key: ""
   # e.g. aura-2-thalia-en, aura-2-andromeda-en, aura-2-helena-en, aura-2-apollo-en, aura-2-orion-en
   deepgram_voice: aura-2-thalia-en
+  # The Echo keeps media volume at maximum for Bluetooth speakers; speech plays at this
+  # fraction of it (0.01-1).
+  speech_volume: 0.3
+stt:
+  # whisper: local (models.whisper, ~5 s per request on a Pi 4). deepgram: Nova-3 in the
+  # cloud using tts.deepgram_api_key, under a second; the recorded request (only the audio
+  # after the wake word) is sent to Deepgram. Whisper remains the fallback.
+  engine: whisper
+  deepgram_model: nova-3
 calendar:
   # Private iCal addresses shown on the dashboard. Google Calendar: Settings -> your
   # calendar -> Integrate calendar -> "Secret address in iCal format". Anyone with the

@@ -220,6 +220,20 @@ services and the `READ_CALENDAR` permission (tap the calendar panel, or
 `adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`). Weather is
 fetched by the Echo itself.
 
+## Speech services and volume
+
+`stt.engine` and `tts.engine` choose local models (Whisper tiny.en, Piper) or Deepgram
+(Nova-3 recognition, Aura-2 voices, key in `tts.deepgram_api_key`). Deepgram recognition
+takes under a second instead of about five, and its voices sound far more natural: local
+voices of similar quality run 5-13x slower than real time on a Pi 4. Deepgram receives
+only the recording made after the wake word, and the reply text. If a Deepgram request
+fails, that request or sentence falls back to the local model.
+
+While the voice service runs, the Echo keeps its media volume at maximum and restores it
+whenever something lowers it, so Bluetooth sources (which scale their own audio) get the
+full speaker range from their own volume controls. The assistant's speech plays at
+`tts.speech_volume` of that (default 0.3), set on the Pi without rebuilding the app.
+
 ## Install on Echo Show 5 / LineageOS (Android 11–13)
 
 LineageOS must already be installed and its microphone/speaker drivers working.

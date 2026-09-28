@@ -17,7 +17,7 @@ import wave
 
 from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
 from voice_assistant import agenda
-from voice_assistant.deepgram import DeepgramVoice
+from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
 from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
@@ -255,7 +255,15 @@ class FakeDeepgram(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        raw = self.rfile.read(int(self.headers['Content-Length']))
+        if urlparse(self.path).path == '/v1/listen':
+            FakeDeepgram.seen.append((self.headers['Authorization'], parse_qs(urlparse(self.path).query), len(raw)))
+            data = json.dumps({'results': {'channels': [{'alternatives': [
+                {'transcript': ' What assignments do I have left tonight? '}]}]}}).encode()
+            self.send_response(200); self.send_header('Content-Length', str(len(data))); self.end_headers()
+            self.wfile.write(data)
+            return
+        body = json.loads(raw)
         FakeDeepgram.seen.append((self.headers['Authorization'], parse_qs(urlparse(self.path).query), body))
         if body['text'] == 'fail':
             self.send_response(401); self.end_headers(); self.wfile.write(b'{"err_msg":"bad key"}')
@@ -284,6 +292,11 @@ class VoiceTests(unittest.TestCase):
                 self.assertEqual((wav.getframerate(), wav.getnframes()), (24000, 2400))
             with self.assertRaisesRegex(RuntimeError, 'Deepgram 401'):
                 voice.synthesize('fail')
+            listener = DeepgramListener('KEY', url=f'http://127.0.0.1:{server.server_port}/v1/listen')
+            self.assertEqual(listener.transcribe(SPEECH), 'What assignments do I have left tonight?')
+            auth, query, size = FakeDeepgram.seen[-1]
+            self.assertEqual((auth, query['model'], query['sample_rate'], size),
+                             ('Token KEY', ['nova-3'], ['16000'], len(SPEECH)))
         finally:
             server.shutdown(); server.server_close()
 
@@ -386,9 +399,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put(SILENCE)
         await self.until('listening')
         await self.socket.incoming.put(SPEECH + SILENCE * 2)
-        first = [e for e in await self.until('audio_end') if isinstance(e, dict) and e.get('type') == 'audio_end']
-        second = [e for e in await self.until('audio_end') if isinstance(e, dict) and e.get('type') == 'audio_end']
-        self.assertEqual([(e['seq'], e['last']) for e in first + second], [(0, False), (1, True)])
+        events = await self.until('audio_end') + await self.until('audio_end')
+        ends = [e for e in events if isinstance(e, dict) and e.get('type') == 'audio_end']
+        self.assertEqual([(e['seq'], e['last']) for e in ends], [(0, False), (1, True)])
+        starts = [e for e in events if isinstance(e, dict) and e.get('type') == 'audio_start']
+        self.assertEqual([e['volume'] for e in starts], [1.0, 1.0])  # no tts config: full volume
         self.assertEqual(self.session.status, 'speaking')  # waits for one ack after the last segment
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': self.session.message_id}))
         await self.until('idle')

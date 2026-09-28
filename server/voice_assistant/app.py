@@ -48,8 +48,17 @@ def load_config(path):
     c['tts'] = tts
     tts.setdefault('engine', 'piper')
     tts.setdefault('deepgram_voice', 'aura-2-thalia-en')
+    tts.setdefault('speech_volume', 0.3)
+    if not 0.01 <= tts['speech_volume'] <= 1:
+        raise ValueError('tts.speech_volume must be between 0.01 and 1')
     if tts['engine'] not in ('piper', 'deepgram') or (tts['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
         raise ValueError('tts.engine must be piper or deepgram; deepgram needs tts.deepgram_api_key')
+    stt = c.setdefault('stt', {}) or {}
+    c['stt'] = stt
+    stt.setdefault('engine', 'whisper')
+    stt.setdefault('deepgram_model', 'nova-3')
+    if stt['engine'] not in ('whisper', 'deepgram') or (stt['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
+        raise ValueError('stt.engine must be whisper or deepgram; deepgram needs tts.deepgram_api_key')
     cal = c.setdefault('calendar', {}) or {}
     c['calendar'] = cal
     cal.setdefault('ical_urls', [])
@@ -198,7 +207,8 @@ class Session:
             total += duration
             last = seq == len(parts) - 1
             await self.event(type='audio_start', id=self.playback_id, seq=seq, last=last, format='wav',
-                             bytes=len(wav), duration_seconds=duration)
+                             bytes=len(wav), duration_seconds=duration,
+                             volume=self.config.get('tts', {}).get('speech_volume', 1.0))
             for offset in range(0, len(wav), 32768):
                 await self.ws.send(wav[offset:offset + 32768])
             await self.event(type='audio_end', id=self.playback_id, seq=seq, last=last)
@@ -417,7 +427,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     config = load_config(args.config)
     from .engines import Engines
-    engines = Engines(config['models'], config['tts'])
+    engines = Engines(config['models'], config['tts'], config['stt'])
     if args.check:
         LOG.info('Configuration and model loading OK')
     else:
