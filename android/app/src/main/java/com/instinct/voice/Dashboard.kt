@@ -102,7 +102,7 @@ private fun Label(text: String, color: Color = Faint) =
 @Composable
 fun GlanceDashboard(
     state: Dashboard, weather: Weather?, weatherError: String?, events: List<Event>,
-    calendarAllowed: Boolean, night: Boolean, onAllowCalendar: () -> Unit, onSettings: () -> Unit,
+    calendarAllowed: Boolean, onAllowCalendar: () -> Unit, onSettings: () -> Unit,
 ) {
     val now by produceState(LocalDateTime.now()) {
         while (true) {
@@ -128,7 +128,7 @@ fun GlanceDashboard(
             size.width * 0.45f, glowB)
     }) {
         CompositionLocalProvider(LocalTextStyle provides Base) {
-            Column(Modifier.fillMaxSize().alpha(if (night) 0.55f else 1f).padding(horizontal = 32.dp, vertical = 22.dp)) {
+            Column(Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 22.dp)) {
                 Row(Modifier.weight(1f)) {
                     Column(Modifier.weight(1f).fillMaxHeight()) {
                         Label(now.format(dateFormat), Soft)

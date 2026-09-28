@@ -26,7 +26,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.time.LocalTime
 
 class MainActivity : ComponentActivity() {
     private var calendarAllowed by mutableStateOf(false)
@@ -81,12 +80,6 @@ class MainActivity : ComponentActivity() {
         systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-    private fun setNightBrightness(night: Boolean) {
-        window.attributes = window.attributes.apply {
-            screenBrightness = if (night) 0.03f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -100,7 +93,6 @@ class MainActivity : ComponentActivity() {
             var weatherError by remember { mutableStateOf<String?>(null) }
             var events by remember { mutableStateOf(emptyList<Event>()) }
             var showSettings by remember { mutableStateOf(settings.token.isBlank()) }
-            var night by remember { mutableStateOf(false) }
             LaunchedEffect(Unit) {
                 while (true) {
                     val result = withContext(Dispatchers.IO) { runCatching { Glance.weather(this@MainActivity) } }
@@ -119,17 +111,9 @@ class MainActivity : ComponentActivity() {
                     delay(60_000)
                 }
             }
-            LaunchedEffect(Unit) {
-                while (true) {
-                    val hour = LocalTime.now().hour
-                    val isNight = hour >= 22 || hour < 7
-                    if (isNight != night) { night = isNight; setNightBrightness(isNight) }
-                    delay(30_000)
-                }
-            }
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF72DCCA),
                 background = Color(0xFF10191E), surface = Color(0xFF1C292F))) {
-                GlanceDashboard(state, weather, weatherError, events, calendarAllowed, night,
+                GlanceDashboard(state, weather, weatherError, events, calendarAllowed,
                     onAllowCalendar = { permissions.launch(arrayOf(Manifest.permission.READ_CALENDAR)) },
                     onSettings = { showSettings = true })
                 if (showSettings) SettingsDialog(settings, state, onDismiss = { showSettings = false })
