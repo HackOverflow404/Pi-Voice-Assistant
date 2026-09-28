@@ -13,7 +13,7 @@ from unittest.mock import patch
 import wave
 
 from voice_assistant.audio import Capture, Framer, FRAME_BYTES
-from voice_assistant.app import Session
+from voice_assistant.app import Session, system_stats
 from voice_assistant.mail import Mail, plain_reply
 from voice_assistant.store import Store
 
@@ -52,6 +52,15 @@ class AudioTests(unittest.TestCase):
         for _ in range(9):
             self.assertFalse(capture.feed(SPEECH))
         self.assertTrue(capture.feed(SPEECH))
+
+
+class SystemStatsTests(unittest.TestCase):
+    def test_reports_memory_and_load(self):
+        stats = system_stats()
+        self.assertGreater(stats['mem_total_mb'], 0)
+        self.assertLessEqual(stats['mem_available_mb'], stats['mem_total_mb'])
+        self.assertGreaterEqual(stats['load1'], 0)
+        json.dumps(stats)
 
 
 class MailTests(unittest.TestCase):
@@ -192,6 +201,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         events = await self.until('idle')
         self.assertIn('No speech', events[-1]['error'])
         self.assertEqual(self.sent, [])
+
+    async def test_session_reports_system_stats(self):
+        self.task = asyncio.create_task(self.session.run())
+        events = await self.until('system')
+        self.assertIn('mem_available_mb', events[-1])
 
     async def test_invalid_pcm_closes_socket(self):
         await self.socket.incoming.put(b'\x01')

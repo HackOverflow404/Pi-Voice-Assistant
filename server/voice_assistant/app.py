@@ -48,6 +48,23 @@ def load_config(path):
     return c
 
 
+def system_stats():
+    """Pi health for the dashboard; any unreadable source is omitted."""
+    stats = {}
+    with suppress(OSError, ValueError, KeyError):
+        info = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+        mb = lambda key: int(info[key].split()[0]) // 1024
+        stats.update(mem_total_mb=mb('MemTotal'), mem_available_mb=mb('MemAvailable'),
+                     swap_used_mb=mb('SwapTotal') - mb('SwapFree'))
+    with suppress(OSError, ValueError, IndexError):
+        stats['load1'] = float(Path('/proc/loadavg').read_text().split()[0])
+    with suppress(OSError, ValueError, IndexError):
+        stats['uptime_s'] = int(float(Path('/proc/uptime').read_text().split()[0]))
+    with suppress(OSError, ValueError):
+        stats['temp_c'] = round(int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000, 1)
+    return stats
+
+
 class Session:
     def __init__(self, ws, config, engines, store):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
@@ -196,9 +213,15 @@ class Session:
             finally:
                 self.flush()
 
+    async def telemetry(self):
+        while True:
+            await self.event(type='system', **system_stats())
+            await asyncio.sleep(30)
+
     async def run(self):
         receiver = asyncio.create_task(self.receive())
         processor = asyncio.create_task(self.process())
+        telemetry = asyncio.create_task(self.telemetry())
         try:
             done, _ = await asyncio.wait([receiver, processor], return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -207,7 +230,8 @@ class Session:
             self.stop.set()
             receiver.cancel()
             processor.cancel()
-            await asyncio.gather(receiver, processor, return_exceptions=True)
+            telemetry.cancel()
+            await asyncio.gather(receiver, processor, telemetry, return_exceptions=True)
 
 
 async def serve(config, engines):

@@ -12,7 +12,15 @@ data class Dashboard(
     val transcript: String = "",
     val reply: String = "",
     val error: String = "",
-    val running: Boolean = false
+    val running: Boolean = false,
+    val pi: PiStatus? = null
+)
+
+/** Pi health from the server's periodic `system` message; null fields were unavailable. */
+data class PiStatus(
+    val memAvailableMb: Int?, val memTotalMb: Int?, val swapUsedMb: Int?,
+    val load1: Double?, val uptimeSeconds: Long?, val tempC: Double?,
+    val receivedAt: Long = System.currentTimeMillis()
 )
 
 object State {
@@ -22,6 +30,12 @@ object State {
         it.copy(connection = value, error = error)
     }
     fun running(value: Boolean) = mutable.update { it.copy(running = value) }
+    fun system(json: JSONObject) = mutable.update {
+        fun int(key: String) = if (json.has(key)) json.optInt(key) else null
+        fun double(key: String) = if (json.has(key)) json.optDouble(key) else null
+        it.copy(pi = PiStatus(int("mem_available_mb"), int("mem_total_mb"), int("swap_used_mb"),
+            double("load1"), if (json.has("uptime_s")) json.optLong("uptime_s") else null, double("temp_c")))
+    }
     fun event(json: JSONObject) = mutable.update {
         it.copy(status = json.optString("status", "idle"),
             transcript = json.optString("last_transcript", ""),
