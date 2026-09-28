@@ -168,6 +168,22 @@ build on the development machine and install through the Pi's adb:
 # Defaults: PI_HOST=tps-l2 PI_DIR=HAL
 ```
 
+## Dashboard
+
+The app is an always-on, full-screen display: 24-hour clock and date; weather from
+[Open-Meteo](https://open-meteo.com/) (no API key) for a location looked up from the
+Echo's public IP (ipapi.co, falling back to geojs.io; cached for a day), with
+today's high/low and the next six hours; today's and tomorrow's events from calendars
+synced on the Echo (cancelled and declined events hidden); and a status bar with the
+voice state and Pi health (CPU temperature, free memory, load), which the server sends
+every 30 seconds. While the assistant is listening, waiting or speaking, a conversation
+card replaces the calendar and stays for 20 seconds after the reply. The background
+follows sunrise and sunset, and the screen dims from 22:00 to 07:00. The gear icon
+opens the connection settings with Start/Stop. Calendar access needs the
+`READ_CALENDAR` permission: tap the calendar panel, or
+`adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`.
+Weather and calendar are fetched by the Echo itself; the Pi does no extra work.
+
 ## Install on Echo Show 5 / LineageOS (Android 11–13)
 
 LineageOS must already be installed and its microphone/speaker drivers working.
@@ -209,7 +225,7 @@ USB-connected to the Pi, `./install` also enables `echo-autostart.timer`. Every 
 seconds it checks over adb whether the Echo's voice service is running and, if the
 user last pressed Start (not Stop), launches the dashboard with the
 `com.instinct.voice.START` action. A visible activity may start the microphone service,
-and the dashboard then returns to the previous app. This covers Echo reboots and app
+and the dashboard stays in front as the always-on display. This covers Echo reboots and app
 updates. It cannot unlock a secure lock screen. Check the last run with
 `systemctl --user status echo-autostart.service` (exit status 0 = OK).
 
