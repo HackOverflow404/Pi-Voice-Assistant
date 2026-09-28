@@ -17,6 +17,8 @@ import wave
 
 from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
 from voice_assistant import agenda
+from voice_assistant.deepgram import DeepgramVoice
+from voice_assistant.engines import Engines
 from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.store import Store
@@ -240,6 +242,57 @@ class WhatsAppTests(unittest.TestCase):
         down = WhatsApp(dict(bridge_url='http://127.0.0.1:9', contact='Instinct', reply_settle_seconds=0))
         with self.assertRaises(TimeoutError):
             down.wait_reply('ABC', 1000, time.time() + 1, threading.Event())
+
+
+class FakeDeepgram(BaseHTTPRequestHandler):
+    seen = []
+
+    def log_message(self, *args): pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        FakeDeepgram.seen.append((self.headers['Authorization'], parse_qs(urlparse(self.path).query), body))
+        if body['text'] == 'fail':
+            self.send_response(401); self.end_headers(); self.wfile.write(b'{"err_msg":"bad key"}')
+            return
+        pcm = struct.pack('<2400h', *([100] * 2400))  # 0.1 s at 24 kHz
+        self.send_response(200)
+        self.send_header('Content-Length', str(len(pcm)))
+        self.end_headers()
+        self.wfile.write(pcm)
+
+
+class VoiceTests(unittest.TestCase):
+    def test_deepgram_request_and_wav(self):
+        server = ThreadingHTTPServer(('127.0.0.1', 0), FakeDeepgram)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            voice = DeepgramVoice('KEY', 'aura-2-thalia-en', url=f'http://127.0.0.1:{server.server_port}/v1/speak')
+            data, duration = voice.synthesize('Hello there.')
+            auth, query, body = FakeDeepgram.seen[-1]
+            self.assertEqual(auth, 'Token KEY')
+            self.assertEqual((query['model'], query['encoding'], query['container']),
+                             (['aura-2-thalia-en'], ['linear16'], ['none']))
+            self.assertEqual(body, {'text': 'Hello there.'})
+            self.assertAlmostEqual(duration, 0.1)
+            with wave.open(io.BytesIO(data)) as wav:
+                self.assertEqual((wav.getframerate(), wav.getnframes()), (24000, 2400))
+            with self.assertRaisesRegex(RuntimeError, 'Deepgram 401'):
+                voice.synthesize('fail')
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_cloud_failure_falls_back_to_piper(self):
+        class Broken:
+            def synthesize(self, text): raise RuntimeError('offline')
+        class Piper:
+            def synthesize_wav(self, text, wav):
+                wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+                wav.writeframes(SILENCE)
+        engines = Engines.__new__(Engines)
+        engines.cloud, engines.piper = Broken(), Piper()
+        data, duration = engines.synthesize('Hello')
+        self.assertAlmostEqual(duration, 0.08)
 
 
 class FakeSocket:

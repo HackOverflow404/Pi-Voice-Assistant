@@ -43,6 +43,12 @@ def load_config(path):
     if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
         raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
+    tts = c.setdefault('tts', {}) or {}
+    c['tts'] = tts
+    tts.setdefault('engine', 'piper')
+    tts.setdefault('deepgram_voice', 'aura-2-thalia-en')
+    if tts['engine'] not in ('piper', 'deepgram') or (tts['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
+        raise ValueError('tts.engine must be piper or deepgram; deepgram needs tts.deepgram_api_key')
     cal = c.setdefault('calendar', {}) or {}
     c['calendar'] = cal
     cal.setdefault('ical_urls', [])
@@ -410,7 +416,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     config = load_config(args.config)
     from .engines import Engines
-    engines = Engines(config['models'])
+    engines = Engines(config['models'], config['tts'])
     if args.check:
         LOG.info('Configuration and model loading OK')
     else:

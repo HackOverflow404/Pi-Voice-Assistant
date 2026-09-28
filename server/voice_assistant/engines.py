@@ -1,9 +1,12 @@
 import io
+import logging
 import wave
+
+LOG = logging.getLogger('voice')
 
 
 class Engines:
-    def __init__(self, config):
+    def __init__(self, config, tts=None):
         import numpy as np
         from openwakeword.model import Model as WakeModel
         from faster_whisper import WhisperModel
@@ -14,7 +17,12 @@ class Engines:
         # Vosk small did not, without inventing text from silence (unlike base.en), and fits
         # the Pi's memory.
         self.whisper = WhisperModel(config['whisper'], device='cpu', compute_type='int8', cpu_threads=4)
-        self.piper = PiperVoice.load(config['piper'])
+        self.piper = PiperVoice.load(config['piper'])  # also the fallback when the cloud voice fails
+        self.cloud = None
+        tts = tts or {}
+        if tts.get('engine') == 'deepgram':
+            from .deepgram import DeepgramVoice
+            self.cloud = DeepgramVoice(tts['deepgram_api_key'], tts['deepgram_voice'])
 
     def predict(self, frame):
         return max(self.wake.predict(self.np.frombuffer(frame, dtype='<i2')).values(), default=0)
@@ -29,6 +37,11 @@ class Engines:
         return ' '.join(s.text.strip() for s in segments).strip()
 
     def synthesize(self, text):
+        if self.cloud:
+            try:
+                return self.cloud.synthesize(text)
+            except Exception as exc:  # no internet, bad key, quota: speak locally instead
+                LOG.warning('Cloud voice failed (%s); using Piper', exc)
         output = io.BytesIO()
         with wave.open(output, 'wb') as wav:
             self.piper.synthesize_wav(text, wav)

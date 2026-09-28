@@ -27,6 +27,13 @@ whatsapp:
   # Replies split across several messages are joined if each follows within this time.
   reply_settle_seconds: 3
   max_reply_chars: 4000
+tts:
+  # piper: local voice (models.piper). deepgram: Aura-2 cloud voices, far more natural and
+  # no load on the Pi, but reply text is sent to Deepgram. Piper remains the fallback.
+  engine: piper
+  deepgram_api_key: ""
+  # e.g. aura-2-thalia-en, aura-2-andromeda-en, aura-2-helena-en, aura-2-apollo-en, aura-2-orion-en
+  deepgram_voice: aura-2-thalia-en
 calendar:
   # Private iCal addresses shown on the dashboard. Google Calendar: Settings -> your
   # calendar -> Integrate calendar -> "Secret address in iCal format". Anyone with the
