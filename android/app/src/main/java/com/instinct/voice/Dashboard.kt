@@ -94,11 +94,11 @@ private fun Modifier.glass() = clip(RoundedCornerShape(28.dp)).background(Glass)
     .border(1.dp, GlassEdge, RoundedCornerShape(28.dp))
 
 private fun Modifier.pill() = clip(RoundedCornerShape(50)).background(Glass)
-    .border(1.dp, GlassEdge, RoundedCornerShape(50)).padding(horizontal = 12.dp, vertical = 6.dp)
+    .border(1.dp, GlassEdge, RoundedCornerShape(50)).padding(horizontal = 14.dp, vertical = 8.dp)
 
 @Composable
 private fun Label(text: String, color: Color = Faint) =
-    Text(text.uppercase(), color = color, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 2.sp)
+    Text(text.uppercase(), color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 2.sp)
 
 @Composable
 fun GlanceDashboard(
@@ -133,18 +133,18 @@ fun GlanceDashboard(
                     Column(Modifier.weight(1f).fillMaxHeight()) {
                         Label(now.format(dateFormat), Soft)
                         Row {
-                            Text(now.format(clockFormat), fontSize = 112.sp, fontWeight = FontWeight.ExtraLight,
-                                letterSpacing = (-5).sp, lineHeight = 112.sp, modifier = Modifier.alignByBaseline())
-                            Text(now.format(secondsFormat), color = Accent, fontSize = 26.sp, fontWeight = FontWeight.Light,
+                            Text(now.format(clockFormat), fontSize = 106.sp, fontWeight = FontWeight.ExtraLight,
+                                letterSpacing = (-5).sp, lineHeight = 106.sp, modifier = Modifier.alignByBaseline())
+                            Text(now.format(secondsFormat), color = Accent, fontSize = 32.sp, fontWeight = FontWeight.Light,
                                 modifier = Modifier.alignByBaseline().padding(start = 10.dp))
                         }
                         Spacer(Modifier.weight(1f))
                         WeatherNow(weather, weatherError)
                         Spacer(Modifier.height(6.dp))
-                        if (weather != null) HourlyCurve(weather, now, colors.bottom, Modifier.fillMaxWidth().height(76.dp))
+                        if (weather != null) HourlyCurve(weather, now, colors.bottom, Modifier.fillMaxWidth().height(88.dp))
                     }
                     Spacer(Modifier.width(28.dp))
-                    AnimatedContent(conversation, Modifier.width(300.dp).fillMaxHeight(),
+                    AnimatedContent(conversation, Modifier.width(320.dp).fillMaxHeight(),
                         transitionSpec = { fadeIn(tween(350)) togetherWith fadeOut(tween(350)) }, label = "panel") { talking ->
                         if (talking) ConversationCard(state) else AgendaCard(events, calendarAllowed, now, onAllowCalendar)
                     }
@@ -159,19 +159,19 @@ fun GlanceDashboard(
 @Composable
 private fun WeatherNow(weather: Weather?, error: String?) {
     if (weather == null) {
-        Text(if (error != null) "Weather unavailable" else "Loading weather…", color = Faint, fontSize = 14.sp)
+        Text(if (error != null) "Weather unavailable" else "Loading weather…", color = Faint, fontSize = 18.sp)
         return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        WeatherIcon(weather.code, weather.isDay, Modifier.size(46.dp))
+        WeatherIcon(weather.code, weather.isDay, Modifier.size(56.dp))
         Spacer(Modifier.width(14.dp))
-        Text(weather.tempC.deg(), fontSize = 50.sp, fontWeight = FontWeight.Light, letterSpacing = (-2).sp)
+        Text(weather.tempC.deg(), fontSize = 60.sp, fontWeight = FontWeight.Light, letterSpacing = (-2).sp)
         Spacer(Modifier.width(18.dp))
         Column {
             Text(condition(weather.code) + if (weather.place.isNotBlank()) "  ·  ${weather.place}" else "",
-                fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                fontSize = 19.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text("H ${weather.highC.deg()}   L ${weather.lowC.deg()}   Feels ${weather.feelsC.deg()}",
-                color = Soft, fontSize = 13.sp)
+                color = Soft, fontSize = 16.sp, maxLines = 1)
         }
     }
 }
@@ -181,14 +181,14 @@ private fun WeatherNow(weather: Weather?, error: String?) {
 private fun HourlyCurve(weather: Weather, now: LocalDateTime, backdrop: Color, modifier: Modifier) {
     val measurer = rememberTextMeasurer()
     val nextHour = now.withMinute(0).withSecond(0).withNano(0).plusHours(1)
-    val hours = weather.hours.filter { !it.time.isBefore(nextHour) }.take(7)
+    val hours = weather.hours.filter { !it.time.isBefore(nextHour) }.take(6)
     if (hours.size < 2) return
-    val valueStyle = Base.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium)
-    val hourStyle = Base.copy(fontSize = 11.sp, color = Faint)
+    val valueStyle = Base.copy(fontSize = 17.sp, fontWeight = FontWeight.Medium)
+    val hourStyle = Base.copy(fontSize = 14.sp, color = Faint)
     val wetStyle = hourStyle.copy(color = Color(0xFF7CC6FF))
     Canvas(modifier) {
-        val top = 24.dp.toPx()
-        val bottom = size.height - 24.dp.toPx()
+        val top = 28.dp.toPx()
+        val bottom = size.height - 28.dp.toPx()
         val min = hours.minOf { it.tempC }
         val span = (hours.maxOf { it.tempC } - min).coerceAtLeast(1.0)
         val step = size.width / hours.size
@@ -205,7 +205,7 @@ private fun HourlyCurve(weather: Weather, now: LocalDateTime, backdrop: Color, m
                 cubicTo(mid, a.y, mid, b.y, b.x, b.y)
             }
         }
-        val floor = size.height - 20.dp.toPx()
+        val floor = size.height - 24.dp.toPx()
         val fill = Path().apply {
             addPath(line)
             lineTo(size.width, floor); lineTo(0f, floor); close()
@@ -251,7 +251,7 @@ private fun AgendaCard(events: List<Event>, allowed: Boolean, now: LocalDateTime
         if (!allowed) {
             Label("Calendar")
             Spacer(Modifier.height(12.dp))
-            Text("Allow calendar access", fontSize = 15.sp, fontWeight = FontWeight.Medium,
+            Text("Allow calendar access", fontSize = 18.sp, fontWeight = FontWeight.Medium,
                 modifier = Modifier.clickable(onClick = onAllow).pill())
             return@Column
         }
@@ -262,27 +262,27 @@ private fun AgendaCard(events: List<Event>, allowed: Boolean, now: LocalDateTime
         if (next == null) {
             Label("Up next")
             Spacer(Modifier.height(10.dp))
-            Text("Nothing scheduled", fontSize = 22.sp, fontWeight = FontWeight.Light)
-            Text("Today and tomorrow are clear", color = Faint, fontSize = 13.sp)
+            Text("Nothing scheduled", fontSize = 26.sp, fontWeight = FontWeight.Light)
+            Text("Today and tomorrow are clear", color = Faint, fontSize = 16.sp)
         } else {
             val begin = Instant.ofEpochMilli(next.begin).atZone(zone)
             val end = Instant.ofEpochMilli(next.end).atZone(zone)
             val happening = nowMs >= next.begin
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(7.dp).clip(CircleShape).background(if (next.color != 0) Color(next.color) else Accent))
+                Box(Modifier.size(9.dp).clip(CircleShape).background(if (next.color != 0) Color(next.color) else Accent))
                 Spacer(Modifier.width(8.dp))
                 Label(if (happening) "Now" else if (begin.toLocalDate() == today) "Up next" else "Tomorrow")
             }
             Spacer(Modifier.height(10.dp))
-            Text(next.title, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 25.sp,
+            Text(next.title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, lineHeight = 29.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(6.dp))
             Row {
-                Text("${begin.format(clockFormat)} – ${end.format(clockFormat)}", color = Soft, fontSize = 14.sp)
+                Text("${begin.format(clockFormat)} – ${end.format(clockFormat)}", color = Soft, fontSize = 18.sp)
                 Text(if (happening) "   ends in ${relative(nowMs, next.end)}" else "   in ${relative(nowMs, next.begin)}",
-                    color = Accent, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    color = Accent, fontSize = 18.sp, fontWeight = FontWeight.Medium)
             }
-            if (next.location.isNotBlank()) Text(shortLocation(next.location), color = Faint, fontSize = 12.sp,
+            if (next.location.isNotBlank()) Text(shortLocation(next.location), color = Faint, fontSize = 15.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         val later = events.filter { it !== next }
@@ -292,20 +292,20 @@ private fun AgendaCard(events: List<Event>, allowed: Boolean, now: LocalDateTime
             Spacer(Modifier.height(12.dp))
             Label("Later")
             Spacer(Modifier.height(4.dp))
-            for (event in later.take(3)) {
+            for (event in later.take(2)) {
                 val start = Instant.ofEpochMilli(event.begin).atZone(zone)
                 val day = start.toLocalDate().coerceAtLeast(today)
                 val time = (if (day != today) start.format(dayFormat) + " " else "") +
                     (if (event.allDay) "All day" else start.format(clockFormat))
                 Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(5.dp).clip(CircleShape).background(if (event.color != 0) Color(event.color) else Accent))
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(if (event.color != 0) Color(event.color) else Accent))
                     Spacer(Modifier.width(8.dp))
-                    Text(time, color = Soft, fontSize = 13.sp, modifier = Modifier.width(78.dp))
-                    Text(event.title, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(time, color = Soft, fontSize = 17.sp, modifier = Modifier.width(98.dp))
+                    Text(event.title, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            if (later.size > 3) Text("+${later.size - 3} more", color = Faint, fontSize = 12.sp,
-                modifier = Modifier.padding(start = 13.dp, top = 2.dp))
+            if (later.size > 2) Text("+${later.size - 2} more", color = Faint, fontSize = 15.sp,
+                modifier = Modifier.padding(start = 15.dp, top = 2.dp))
         }
     }
 }
@@ -326,15 +326,15 @@ private fun ConversationCard(state: Dashboard) {
             Label(title, color)
         }
         Spacer(Modifier.height(16.dp))
-        if (state.transcript.isNotBlank()) Text("“${state.transcript}”", fontSize = 21.sp, fontWeight = FontWeight.Light,
-            lineHeight = 27.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-        if (state.status == "waiting") Text("Sent by email, waiting for the reply", color = Faint, fontSize = 13.sp,
+        if (state.transcript.isNotBlank()) Text("“${state.transcript}”", fontSize = 26.sp, fontWeight = FontWeight.Light,
+            lineHeight = 32.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+        if (state.status == "waiting") Text("Sent by email, waiting for the reply", color = Faint, fontSize = 16.sp,
             modifier = Modifier.padding(top = 8.dp))
         if (state.reply.isNotBlank() && state.status in listOf("speaking", "idle")) {
             Spacer(Modifier.weight(1f))
             Box(Modifier.fillMaxWidth().height(1.dp).background(GlassEdge))
             Spacer(Modifier.height(12.dp))
-            Text(state.reply, color = Soft, fontSize = 15.sp, lineHeight = 21.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
+            Text(state.reply, color = Soft, fontSize = 19.sp, lineHeight = 25.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -343,11 +343,11 @@ private fun ConversationCard(state: Dashboard) {
 @Composable
 private fun Equalizer(color: Color, active: Boolean) {
     val transition = rememberInfiniteTransition(label = "eq")
-    Row(Modifier.height(16.dp), horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.height(20.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
         for (i in 0 until 5) {
             val level = if (!active) 0.35f else transition.animateFloat(0.25f, 1f,
                 infiniteRepeatable(tween(380 + i * 90), RepeatMode.Reverse), label = "bar$i").value
-            Box(Modifier.width(3.dp).fillMaxHeight(level).clip(RoundedCornerShape(2.dp)).background(color))
+            Box(Modifier.width(4.dp).fillMaxHeight(level).clip(RoundedCornerShape(2.dp)).background(color))
         }
     }
 }
@@ -356,7 +356,7 @@ private fun Equalizer(color: Color, active: Boolean) {
 private fun Dot(color: Color, pulse: Boolean) {
     val alpha = if (pulse) rememberInfiniteTransition(label = "pulse").animateFloat(0.35f, 1f,
         infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "alpha").value else 1f
-    Box(Modifier.size(7.dp).alpha(alpha).clip(CircleShape).background(color))
+    Box(Modifier.size(9.dp).alpha(alpha).clip(CircleShape).background(color))
 }
 
 @Composable
@@ -372,15 +372,15 @@ private fun StatusBar(state: Dashboard, now: LocalDateTime, onSettings: () -> Un
         Row(Modifier.weight(1f, fill = false).pill(), verticalAlignment = Alignment.CenterVertically) {
             Dot(voiceColor, pulse = state.running && state.connection == "Connected" && state.status != "idle")
             Spacer(Modifier.width(8.dp))
-            Text(voice, color = Soft, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+            Text(voice, color = Soft, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1,
                 overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.weight(1f))
         PiPill(state.pi, state.connection == "Connected", now)
         Spacer(Modifier.width(8.dp))
-        Box(Modifier.size(30.dp).clip(CircleShape).background(Glass).border(1.dp, GlassEdge, CircleShape)
+        Box(Modifier.size(38.dp).clip(CircleShape).background(Glass).border(1.dp, GlassEdge, CircleShape)
             .clickable(onClick = onSettings), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = Faint, modifier = Modifier.size(16.dp))
+            Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = Faint, modifier = Modifier.size(20.dp))
         }
     }
 }
@@ -393,18 +393,18 @@ private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime) {
         if (!fresh) {
             Dot(Red, pulse = false)
             Spacer(Modifier.width(8.dp))
-            Text("Pi offline", color = Soft, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            Text("Pi offline", color = Soft, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             return@Row
         }
         val strained = (pi!!.memAvailableMb ?: Int.MAX_VALUE) < 300 || (pi.tempC ?: 0.0) >= 75
         Dot(if (strained) Amber else Accent, pulse = false)
         Spacer(Modifier.width(8.dp))
-        Text("Pi", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text("Pi", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         val parts = listOfNotNull(
             pi.tempC?.let { "${it.roundToInt()}°C" },
             pi.memAvailableMb?.let { if (it >= 1024) "%.1f GB free".format(it / 1024.0) else "$it MB free" },
             pi.load1?.let { "load %.1f".format(it) },
         )
-        Text("   " + parts.joinToString("   "), color = Soft, fontSize = 12.sp)
+        Text("   " + parts.joinToString("   "), color = Soft, fontSize = 16.sp)
     }
 }

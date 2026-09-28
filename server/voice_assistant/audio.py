@@ -20,18 +20,34 @@ class Framer:
             yield frame
 
 
+def rms(frame):
+    samples = struct.unpack('<' + 'h' * (len(frame) // 2), frame)
+    return math.sqrt(sum(x * x for x in samples) / len(samples)) if samples else 0.0
+
+
+def speech_threshold(config, wake_levels, idle_levels):
+    """Speech level scaled to how loudly the wake phrase was just said: the request
+    follows at the same distance and volume, and mic gain varies by device. Kept above
+    the room's noise floor, never below 100, and capped by config speech_rms."""
+    peak = max(wake_levels, default=0.0)
+    noise = sorted(idle_levels)[len(idle_levels) // 5] if idle_levels else 0.0
+    return min(config['speech_rms'], max(0.3 * peak, 2.5 * noise, 100.0))
+
+
 class Capture:
-    def __init__(self, config):
+    def __init__(self, config, threshold=None):
         self.config = config
+        self.threshold = threshold or config['speech_rms']
         self.frames = []
         self.speech = False
         self.silence = 0.0
+        self.peak = 0.0
 
     def feed(self, frame):
         self.frames.append(frame)
-        samples = struct.unpack('<' + 'h' * (len(frame) // 2), frame)
-        rms = math.sqrt(sum(x * x for x in samples) / len(samples))
-        if rms >= self.config['speech_rms']:
+        level = rms(frame)
+        self.peak = max(self.peak, level)
+        if level >= self.threshold:
             self.speech = True
             self.silence = 0.0
         else:

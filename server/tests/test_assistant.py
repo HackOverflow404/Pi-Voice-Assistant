@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from voice_assistant.audio import Capture, Framer, FRAME_BYTES
+from voice_assistant.audio import Capture, Framer, FRAME_BYTES, speech_threshold
 from voice_assistant.app import Session, system_stats
 from voice_assistant.mail import Mail, plain_reply
 from voice_assistant.store import Store
@@ -52,6 +52,23 @@ class AudioTests(unittest.TestCase):
         for _ in range(9):
             self.assertFalse(capture.feed(SPEECH))
         self.assertTrue(capture.feed(SPEECH))
+
+
+class ThresholdTests(unittest.TestCase):
+    def test_scales_with_wake_phrase_within_bounds(self):
+        self.assertEqual(speech_threshold(AUDIO, [600], [50] * 10), 180)    # quiet mic
+        self.assertEqual(speech_threshold(AUDIO, [3000], [50] * 10), 450)   # capped by config
+        self.assertEqual(speech_threshold(AUDIO, [600], [120] * 10), 300)   # above the noise floor
+        self.assertEqual(speech_threshold(AUDIO, [], []), 100)              # never below 100
+
+    def test_quiet_speech_counts_with_lower_threshold(self):
+        quiet = struct.pack('<1280h', *([300] * 1280))
+        capture = Capture(AUDIO, threshold=180)
+        capture.feed(quiet)
+        self.assertTrue(capture.speech)
+        default = Capture(AUDIO)  # the fixed 450 threshold misses the same speech
+        default.feed(quiet)
+        self.assertFalse(default.speech)
 
 
 class SystemStatsTests(unittest.TestCase):

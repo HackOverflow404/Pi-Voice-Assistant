@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from collections import deque
 from contextlib import suppress
 import hmac
 import json
@@ -10,7 +11,7 @@ import ssl
 import threading
 import time
 
-from .audio import Capture, Framer
+from .audio import FRAME_SECONDS, Capture, Framer, rms, speech_threshold
 from .mail import Mail
 from .store import Store
 
@@ -178,6 +179,7 @@ class Session:
         self.flush()
         await self.set_status('idle', self.error)
         capture = None
+        levels = deque(maxlen=50)  # last 4 s of frame loudness while waiting for the wake word
         while True:
             try:
                 frame = await asyncio.wait_for(self.queue.get(), 15)
@@ -185,13 +187,21 @@ class Session:
                 await self.ws.close(1008, 'No microphone audio received for 15 seconds')
                 return
             if capture is None:
+                levels.append(rms(frame))
                 score = await self.blocking(self.engines.predict, frame)
                 if score >= self.config['audio']['wake_threshold']:
-                    capture = Capture(self.config['audio'])
+                    recent = list(levels)
+                    threshold = speech_threshold(self.config['audio'], recent[-15:], recent)
+                    LOG.info('Wake word (score %.2f): phrase peak %d, noise %d, speech threshold %d', score,
+                             max(recent[-15:]), sorted(recent)[len(recent) // 5], threshold)
+                    capture = Capture(self.config['audio'], threshold)
                     await self.set_status('listening')
                 continue
             if not capture.feed(frame):
                 continue
+            LOG.info('Utterance ended after %.1f s: speech=%s, peak %d', len(capture.frames) * FRAME_SECONDS,
+                     capture.speech, capture.peak)
+            levels.clear()
             pcm, capture = capture.pcm, None
             try:
                 await self.set_status('transcribing')
