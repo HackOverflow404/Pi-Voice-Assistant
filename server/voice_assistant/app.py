@@ -146,7 +146,8 @@ class Session:
     async def set_status(self, status, error=None):
         self.status, self.error = status, error
         await self.event(type='status', status=status, last_transcript=self.transcript,
-                         last_reply=self.reply, message_id=self.message_id, error=error)
+                         last_reply=self.reply, message_id=self.message_id, error=error,
+                         speech_volume=self.config.get('tts', {}).get('speech_volume', 1.0))
 
     async def blocking(self, function, *args):
         # Do not release the shared engines to another session while a native call is running.
@@ -308,6 +309,7 @@ class Session:
                 self.store.rename(self.message_id, sent['id'])
                 self.message_id = sent['id']
                 self.store.update(self.message_id, 'sent')
+                await self.event(type='sent', id=self.message_id)  # the Echo chimes
                 await self.wait_and_speak(self.store.latest()['created'], sent['timestamp'])
                 await self.set_status('idle')
             except NoReply:

@@ -144,6 +144,8 @@ class VoiceService : Service() {
         var audioId: String? = null
         var last = true
         var volume = 1f
+        var lastStatus = ""
+        var chimeVolume = 1f
         var expected = 0L
         var received = 0L
         // Replies arrive one sentence at a time; play each as soon as it is complete while
@@ -181,8 +183,13 @@ class VoiceService : Service() {
                         when (json.getString("type")) {
                             "status" -> {
                                 State.event(json)
-                                muted = json.optString("status") !in listOf("idle", "listening")
+                                val status = json.optString("status")
+                                chimeVolume = json.optDouble("speech_volume", chimeVolume.toDouble()).toFloat()
+                                if (status == "listening" && lastStatus != "listening") Chimes.listening(chimeVolume)
+                                lastStatus = status
+                                muted = status !in listOf("idle", "listening")
                             }
+                            "sent" -> Chimes.sent(chimeVolume)
                             "system" -> State.system(json)
                             "calendar" -> State.calendar(json)
                             "audio_start" -> {

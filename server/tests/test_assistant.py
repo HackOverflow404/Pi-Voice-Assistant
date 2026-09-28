@@ -72,6 +72,14 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(normalize(SILENCE), (SILENCE, 1.0))
         self.assertEqual(normalize(struct.pack('<1280h', *([10] * 1280)))[1], 40.0)  # gain is capped
 
+    def test_chime_at_start_is_not_speech(self):
+        capture = Capture(dict(AUDIO, listen_grace_seconds=0.16))
+        self.assertFalse(capture.feed(SPEECH) or capture.feed(SPEECH))  # chime frames
+        self.assertFalse(capture.speech)
+        self.assertEqual(len(capture.frames), 2)  # still recorded for transcription
+        capture.feed(SPEECH)
+        self.assertTrue(capture.speech)
+
     def test_quiet_speech_counts_with_lower_threshold(self):
         quiet = struct.pack('<1280h', *([300] * 1280))
         capture = Capture(AUDIO, threshold=180)
@@ -385,6 +393,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with wave.open(io.BytesIO(data), 'rb') as wav:
             self.assertEqual(wav.getnframes(), 1280)
         self.assertEqual(self.sent, ['What is the weather?'])
+        self.assertTrue(any(isinstance(e, dict) and e.get('type') == 'sent' and e['id'] == 'WA1' for e in events))
         self.assertEqual(self.store.latest()['message_id'], 'WA1')  # replies are matched to WhatsApp's ID
         self.assertEqual(self.store.latest()['status'], 'replied')
         self.assertEqual(self.store.latest()['reply'], 'It is sunny.')  # sign-off stripped

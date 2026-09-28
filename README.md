@@ -232,7 +232,10 @@ fails, that request or sentence falls back to the local model.
 While the voice service runs, the Echo keeps its media volume at maximum and restores it
 whenever something lowers it, so Bluetooth sources (which scale their own audio) get the
 full speaker range from their own volume controls. The assistant's speech plays at
-`tts.speech_volume` of that (default 0.3), set on the Pi without rebuilding the app.
+`tts.speech_volume` of that (default 0.3), set on the Pi without rebuilding the app. The Echo also plays
+a rising chime when it starts listening and a short arpeggio once the request has been sent
+to Instinct, at the same volume. `audio.listen_grace_seconds` keeps the start of each
+recording, where the chime plays, from counting as speech; that audio is still transcribed.
 
 ## Install on Echo Show 5 / LineageOS (Android 11–13)
 

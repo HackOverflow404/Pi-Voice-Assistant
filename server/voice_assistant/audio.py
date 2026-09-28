@@ -55,9 +55,14 @@ class Capture:
         self.speech = False
         self.silence = 0.0
         self.peak = 0.0
+        # The Echo plays a chime as listening starts; don't let it count as speech or silence.
+        self.grace = config.get('listen_grace_seconds', 0.0)
 
     def feed(self, frame):
         self.frames.append(frame)
+        elapsed = len(self.frames) * FRAME_SECONDS
+        if elapsed <= self.grace:
+            return False
         level = rms(frame)
         self.peak = max(self.peak, level)
         if level >= self.threshold:
@@ -65,7 +70,6 @@ class Capture:
             self.silence = 0.0
         else:
             self.silence += FRAME_SECONDS
-        elapsed = len(self.frames) * FRAME_SECONDS
         return (elapsed >= self.config['max_utterance_seconds'] or
                 (self.speech and self.silence >= self.config['silence_seconds']) or
                 (not self.speech and elapsed >= self.config['start_timeout_seconds']))
