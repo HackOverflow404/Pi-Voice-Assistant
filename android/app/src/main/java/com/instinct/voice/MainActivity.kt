@@ -35,10 +35,28 @@ class MainActivity : ComponentActivity() {
         ContextCompat.startForegroundService(this, Intent(this, VoiceService::class.java))
     }
 
+    // Without device ownership, Android 11+ blocks microphone services started from the
+    // background, so the Pi's adb watcher restarts the service through this visible activity.
+    // It only resumes a service the user already started; Stop still disables it.
+    private fun handleStart(intent: Intent?) {
+        if (intent?.action != ACTION_START) return
+        val settings = Settings(this)
+        if (!settings.enabled || settings.token.isBlank() || ContextCompat.checkSelfPermission(this,
+                Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        startVoice()
+        window.decorView.postDelayed({ moveTaskToBack(true) }, 1500)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleStart(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val settings = Settings(this)
+        handleStart(intent)
         setContent {
             val state by State.flow.collectAsStateWithLifecycle()
             var url by remember { mutableStateOf(settings.url) }
@@ -91,6 +109,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+const val ACTION_START = "com.instinct.voice.START"
 
 @Composable
 private fun StatusCard(title: String, value: String, modifier: Modifier = Modifier) {

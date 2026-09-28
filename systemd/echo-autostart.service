@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart the Echo voice app over adb if its service is not running
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/pi-voice-assistant/scripts/echo-autostart.sh
+TimeoutStartSec=60

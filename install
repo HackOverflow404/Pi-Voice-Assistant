@@ -32,7 +32,10 @@ fi
 PYTHONPATH="$live/server" "$live/.venv/bin/python" -m voice_assistant.app --config "$live/config.yaml" --check
 [[ ! -f "$unit" ]] || cp -a "$unit" "$unit.$(date +%Y%m%d-%H%M%S).bak"
 install -m 644 "$source_dir/systemd/pi-voice-assistant.service" "$unit"
+for name in echo-autostart.service echo-autostart.timer; do
+  install -m 644 "$source_dir/systemd/$name" "$(dirname "$unit")/$name"
+done
 systemctl --user daemon-reload
 run_privileged loginctl enable-linger "$(id -un)"
-systemctl --user enable --now pi-voice-assistant.service
+systemctl --user enable --now pi-voice-assistant.service echo-autostart.timer
 systemctl --user --no-pager status pi-voice-assistant.service

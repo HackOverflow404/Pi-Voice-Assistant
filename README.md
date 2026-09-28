@@ -25,6 +25,7 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 - `setup.sh`: Debian packages, isolated Python 3.11 runtime, dependencies, model downloads.
 - `install`, `uninstall`: install/remove separate live copies and a systemd user unit.
 - `build-apk.sh`: checked Gradle distribution download, APK build, Android lint (refuses to run on the Pi).
+- `scripts/echo-autostart.sh`, `systemd/echo-autostart.*`: Pi timer that restarts the Echo app over adb.
 - `deploy-apk.sh`: build on the dev machine, copy to the Pi, install on the Echo via the Pi's adb.
 
 ## Pi setup (ARM64 Debian / Raspberry Pi OS)
@@ -203,6 +204,15 @@ adb shell dpm set-device-owner com.instinct.voice/.OwnerReceiver
 adb shell dumpsys device_policy
 ```
 
+**Without device ownership (e.g. a Google account is signed in):** when the Echo stays
+USB-connected to the Pi, `./install` also enables `echo-autostart.timer`. Every 30
+seconds it checks over adb whether the Echo's voice service is running and, if the
+user last pressed Start (not Stop), launches the dashboard with the
+`com.instinct.voice.START` action. A visible activity may start the microphone service,
+and the dashboard then returns to the previous app. This covers Echo reboots and app
+updates. It cannot unlock a secure lock screen. Check it with
+`journalctl --user -u echo-autostart`.
+
 If provisioning is rejected, read the command's reason and the ROM's requirements.
 Do not factory-reset a device just to bypass the failure. Without device-owner
 provisioning, boot posts a notification asking you to open the dashboard and
@@ -282,7 +292,7 @@ Lightweight server tests don't require speech models or Gmail credentials:
 python3 -m venv .test-venv
 .test-venv/bin/pip install PyYAML==6.0.2 websockets==15.0.1 IMAPClient==3.0.1
 PYTHONPATH=server .test-venv/bin/python -m unittest discover -s server/tests -v
-bash -n setup.sh install uninstall build-apk.sh deploy-apk.sh
+bash -n setup.sh install uninstall build-apk.sh deploy-apk.sh scripts/echo-autostart.sh
 ```
 
 Tests cover fragmented PCM, silence/max-duration endpointing, exact email
