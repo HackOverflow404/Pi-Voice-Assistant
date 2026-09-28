@@ -30,6 +30,10 @@ class WhatsApp:
         body = f'{text}\n\n{instruction}' if instruction else text
         return self.call('POST', '/send', {'contact': self.config['contact'], 'text': body}, timeout=30)
 
+    def revoke(self, message_id):
+        """Delete a sent request for everyone (the user cancelled it)."""
+        self.call('POST', '/revoke', {'contact': self.config['contact'], 'id': message_id}, timeout=30)
+
     def wait_reply(self, request, since, deadline, stop):
         """The contact's answer to message `request`. The chat also carries unrelated
         conversation, so the bridge decides which messages answer it (see repliesTo in
@@ -42,7 +46,7 @@ class WhatsApp:
             remaining = end - time.time()
             if remaining <= 0:
                 break
-            wait = max(1, min(20, int(remaining)))
+            wait = max(1, min(5, int(remaining)))  # short polls so a cancel is noticed quickly
             query = urllib.parse.urlencode({'contact': self.config['contact'], 'request': request,
                                             'since': int(since), 'after': after, 'wait': wait})
             try:

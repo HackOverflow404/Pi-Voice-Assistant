@@ -12,6 +12,10 @@ data class Dashboard(
     val transcript: String = "",
     val reply: String = "",
     val error: String = "",
+    /** Seconds the Pi waits before sending, so a false trigger can be cancelled. */
+    val sendDelay: Int = 0,
+    /** When the current status began (for the send countdown). */
+    val statusSince: Long = 0,
     val running: Boolean = false,
     val pi: PiStatus? = null,
     /** Events the Pi reads from the configured iCal links; null until it sends any. */
@@ -49,7 +53,9 @@ object State {
             double("cpu_percent"), double("mem_percent")))
     }
     fun event(json: JSONObject) = mutable.update {
-        it.copy(status = json.optString("status", "idle"),
+        val status = json.optString("status", "idle")
+        it.copy(status = status, sendDelay = json.optInt("send_delay", 0),
+            statusSince = if (status != it.status) System.currentTimeMillis() else it.statusSince,
             transcript = json.optString("last_transcript", ""),
             reply = json.optString("last_reply", ""),
             error = if (json.isNull("error")) "" else json.optString("error", ""))

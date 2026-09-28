@@ -146,7 +146,7 @@ fun GlanceDashboard(
                     Spacer(Modifier.width(28.dp))
                     AnimatedContent(conversation, Modifier.width(320.dp).fillMaxHeight(),
                         transitionSpec = { fadeIn(tween(350)) togetherWith fadeOut(tween(350)) }, label = "panel") { talking ->
-                        if (talking) ConversationCard(state) else AgendaCard(events, calendarAllowed, now, onAllowCalendar)
+                        if (talking) ConversationCard(state, now) else AgendaCard(events, calendarAllowed, now, onAllowCalendar)
                     }
                 }
                 Spacer(Modifier.height(14.dp))
@@ -312,15 +312,23 @@ private fun AgendaCard(allEvents: List<Event>, allowed: Boolean, now: LocalDateT
 }
 
 @Composable
-private fun ConversationCard(state: Dashboard) {
+private fun ConversationCard(state: Dashboard, now: LocalDateTime) {
+    val nowMs = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val cancellable = state.status in listOf("confirming", "waiting")
     val (title, color) = when (state.status) {
         "listening" -> "Listening" to Accent
         "transcribing" -> "Transcribing" to Accent
+        "confirming" -> {
+            val left = ((state.sendDelay * 1000L - (nowMs - state.statusSince) + 999) / 1000).coerceAtLeast(1)
+            "Sending in $left" to Amber
+        }
         "waiting" -> "Waiting for reply" to Amber
         "speaking" -> "Speaking" to Accent
         else -> "Done" to Soft
     }
-    Column(Modifier.fillMaxSize().glass().padding(22.dp)) {
+    Column(Modifier.fillMaxSize().glass()
+        .then(if (cancellable) Modifier.clickable { VoiceService.cancelRequest() } else Modifier)
+        .padding(22.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Equalizer(color, active = state.status in listOf("listening", "speaking"))
             Spacer(Modifier.width(10.dp))
@@ -329,6 +337,11 @@ private fun ConversationCard(state: Dashboard) {
         Spacer(Modifier.height(16.dp))
         if (state.transcript.isNotBlank()) Text("“${state.transcript}”", fontSize = 26.sp, fontWeight = FontWeight.Light,
             lineHeight = 32.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+        if (cancellable) {
+            Spacer(Modifier.weight(1f))
+            Text(if (state.status == "confirming") "Tap to cancel" else "Tap to cancel and unsend",
+                color = Faint, fontSize = 16.sp)
+        }
         if (state.reply.isNotBlank() && state.status in listOf("speaking", "idle")) {
             Spacer(Modifier.weight(1f))
             Box(Modifier.fillMaxWidth().height(1.dp).background(GlassEdge))

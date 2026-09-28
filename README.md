@@ -220,6 +220,17 @@ services and the `READ_CALENDAR` permission (tap the calendar panel, or
 `adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`). Weather is
 fetched by the Echo itself.
 
+## False triggers
+
+The wake-word model occasionally fires on near-silence or on TV and conversation, so:
+
+- A detection only counts if the phrase is `audio.wake_min_ratio` (6) times louder than the
+  room just before it; ignored detections are logged as "Ignored wake word".
+- After transcribing, the Echo shows "Sending in 3" for `whatsapp.send_delay_seconds`; tap
+  the card to discard the request. Saying just "cancel" or "never mind" also discards it.
+- While waiting for the reply, tapping the card cancels the request and deletes the
+  WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
+
 ## Speech services and volume
 
 `stt.engine` and `tts.engine` choose local models (Whisper tiny.en, Piper) or Deepgram

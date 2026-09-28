@@ -9,6 +9,7 @@
 //	GET  /replies?contact=&request=&since=&after=&wait=
 //	                                              -> {"messages": [...]} the contact's replies to message `request`
 //	GET  /chat?contact=                           -> recent messages in that chat, both directions (for setup)
+//	POST /revoke   {"contact", "id"}              -> delete one of our messages for everyone
 //	GET  /contacts?q=                             -> contacts whose names contain q (for setup)
 package main
 
@@ -443,6 +444,29 @@ func (b *bridge) routes() *http.ServeMux {
 			}
 		}
 		reply(w, 200, map[string]any{"contacts": found})
+	})
+	mux.HandleFunc("POST /revoke", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Contact, ID string }
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+			fail(w, 400, errors.New(`send {"contact": "...", "id": "..."}`))
+			return
+		}
+		if !b.client.IsLoggedIn() {
+			fail(w, 503, errors.New("not connected to WhatsApp"))
+			return
+		}
+		c, err := b.resolve(r.Context(), req.Contact)
+		if err != nil {
+			fail(w, statusFor(err), err)
+			return
+		}
+		// An empty sender means one of our own messages.
+		if _, err := b.client.SendMessage(r.Context(), c.sendTo, b.client.BuildRevoke(c.sendTo, types.EmptyJID, req.ID)); err != nil {
+			fail(w, 502, err)
+			return
+		}
+		log.Printf("revoked %s in %s", req.ID, c.name)
+		reply(w, 200, map[string]string{"revoked": req.ID})
 	})
 	mux.HandleFunc("GET /chat", func(w http.ResponseWriter, r *http.Request) {
 		c, err := b.resolve(r.Context(), r.URL.Query().Get("contact"))

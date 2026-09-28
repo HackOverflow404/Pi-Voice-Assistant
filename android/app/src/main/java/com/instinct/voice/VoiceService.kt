@@ -62,6 +62,7 @@ class VoiceService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        current = this
         registerReceiver(volumeWatcher, IntentFilter(VOLUME_CHANGED))
         pinMediaVolume()
     }
@@ -298,6 +299,7 @@ class VoiceService : Service() {
     }
 
     override fun onDestroy() {
+        current = null
         unregisterReceiver(volumeWatcher)
         socket?.cancel()
         scope.cancel()
@@ -313,6 +315,13 @@ class VoiceService : Service() {
     }
 
     companion object {
+        @Volatile private var current: VoiceService? = null
+
+        /** Dashboard tap: discard the request before it is sent, or unsend it while waiting. */
+        fun cancelRequest() {
+            current?.socket?.send(JSONObject().put("type", "cancel").toString())
+        }
+
         private const val CHANNEL = "voice"
         // Hidden AudioManager broadcast and extra, sent whenever a stream's volume changes.
         private const val VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"

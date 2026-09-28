@@ -14,7 +14,8 @@ import uuid
 import wave
 
 from . import agenda
-from .audio import FRAME_SECONDS, Capture, Framer, normalize, rms, speech_threshold
+from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, normalize, rms, speech_threshold,
+                    wake_is_plausible)
 from .speech import chunks, speakable
 from .store import Store
 from .whatsapp import WhatsApp
@@ -41,6 +42,7 @@ def load_config(path):
         raise ValueError('Invalid audio thresholds or durations')
     w = c['whatsapp']
     w.setdefault('instruction', '')
+    w.setdefault('send_delay_seconds', 3)
     if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
         raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
@@ -79,6 +81,25 @@ def load_config(path):
 
 class NoReply(Exception):
     """No reply arrived before the request deadline."""
+
+
+class Cancelled(Exception):
+    """The user cancelled a request that was already sent."""
+
+
+class AnyEvent:
+    """is_set()/wait() over several threading.Events: session shutdown or a user cancel."""
+    def __init__(self, *events):
+        self.events = events
+
+    def is_set(self):
+        return any(e.is_set() for e in self.events)
+
+    def wait(self, timeout):
+        end = time.monotonic() + timeout
+        while not self.is_set() and time.monotonic() < end:
+            time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+        return self.is_set()
 
 
 _last_cpu = None  # (busy, total) jiffies at the previous system_stats() call
@@ -139,6 +160,8 @@ class Session:
         self.reply = ''
         self.message_id = None
         self.error = None
+        self.cancel = asyncio.Event()  # the Echo's Cancel tap, before sending
+        self.abort = threading.Event()  # the same tap while waiting for the reply
 
     async def event(self, **payload):
         await self.ws.send(json.dumps(payload))
@@ -147,7 +170,8 @@ class Session:
         self.status, self.error = status, error
         await self.event(type='status', status=status, last_transcript=self.transcript,
                          last_reply=self.reply, message_id=self.message_id, error=error,
-                         speech_volume=self.config.get('tts', {}).get('speech_volume', 1.0))
+                         speech_volume=self.config.get('tts', {}).get('speech_volume', 1.0),
+                         send_delay=self.config.get('whatsapp', {}).get('send_delay_seconds', 0))
 
     async def blocking(self, function, *args):
         # Do not release the shared engines to another session while a native call is running.
@@ -184,6 +208,9 @@ class Session:
             else:
                 try:
                     event = json.loads(data)
+                    if event.get('type') == 'cancel' and self.status in ('confirming', 'waiting'):
+                        self.cancel.set()
+                        self.abort.set()
                     if (event.get('type') in ('playback_done', 'playback_error') and
                             self.playback_id and event.get('id') == self.playback_id):
                         self.playback_error = event.get('type') == 'playback_error'
@@ -234,10 +261,14 @@ class Session:
         w = self.config['whatsapp']
         try:
             raw = await self.blocking(self.messenger.wait_reply, self.message_id, since or created - 5,
-                                      created + w['reply_timeout_seconds'], self.stop)
+                                      created + w['reply_timeout_seconds'], AnyEvent(self.stop, self.abort))
         except TimeoutError as exc:
             self.store.update(self.message_id, 'expired')
             raise NoReply from exc
+        except InterruptedError as exc:
+            if self.abort.is_set() and not self.stop.is_set():
+                raise Cancelled from exc
+            raise
         self.reply = speakable(raw)[:w['max_reply_chars']]
         self.store.update(self.message_id, 'replied', self.reply)
         await self.speak(self.reply)
@@ -264,6 +295,8 @@ class Session:
             await self.recover()
         except NoReply:
             await self.set_status('idle', self.no_reply_message())
+        except Cancelled:
+            await self.retract()
         except Exception as exc:
             LOG.warning('Recovery failed: %s', type(exc).__name__)
             await self.set_status('idle', f'Recovery failed: {type(exc).__name__}')
@@ -282,6 +315,12 @@ class Session:
                 score = await self.blocking(self.engines.predict, frame)
                 if score >= self.config['audio']['wake_threshold']:
                     recent = list(levels)
+                    before = recent[:-15]
+                    if not wake_is_plausible(self.config['audio'], recent[-15:], before):
+                        LOG.info('Ignored wake word (score %.2f): phrase peak %d, room %d', score,
+                                 max(recent[-15:]), sorted(before)[len(before) // 5] if before else 0)
+                        self.engines.reset()
+                        continue
                     threshold = speech_threshold(self.config['audio'], recent[-15:], recent)
                     LOG.info('Wake word (score %.2f): phrase peak %d, noise %d, speech threshold %d', score,
                              max(recent[-15:]), sorted(recent)[len(recent) // 5], threshold)
@@ -300,6 +339,21 @@ class Session:
                 if not self.transcript:
                     await self.set_status('idle', 'No speech recognized; say the wake phrase again')
                     continue
+                if is_cancel_phrase(self.transcript):
+                    await self.set_status('idle', 'Cancelled')
+                    continue
+                # A short window to discard a false trigger before anything is sent.
+                self.cancel.clear()
+                self.abort.clear()
+                delay = self.config['whatsapp'].get('send_delay_seconds', 0)
+                if delay:
+                    await self.set_status('confirming')
+                    with suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self.cancel.wait(), delay)
+                    if self.cancel.is_set():
+                        LOG.info('Request cancelled before sending')
+                        await self.set_status('idle', 'Cancelled')
+                        continue
                 self.reply = ''
                 self.message_id = f'<{uuid.uuid4()}@pi-voice>'
                 self.store.create(self.message_id, self.transcript)
@@ -315,11 +369,24 @@ class Session:
             except NoReply:
                 LOG.info('No reply to %s before the deadline', self.message_id)
                 await self.set_status('idle', self.no_reply_message())
+            except Cancelled:
+                await self.retract()
             except Exception as exc:
                 LOG.warning('Request failed: %s', type(exc).__name__)
                 await self.set_status('idle', f'{type(exc).__name__}: request failed; check WhatsApp/network')
             finally:
                 self.flush()
+
+    async def retract(self):
+        """Delete the cancelled request from the chat for everyone, and stop waiting."""
+        self.store.update(self.message_id, 'cancelled')
+        try:
+            await self.blocking(self.messenger.revoke, self.message_id)
+            LOG.info('Cancelled and unsent %s', self.message_id)
+            await self.set_status('idle', 'Cancelled and unsent')
+        except Exception as exc:
+            LOG.warning('Could not unsend %s: %s', self.message_id, type(exc).__name__)
+            await self.set_status('idle', 'Cancelled; could not unsend the message')
 
     def save_utterance(self, pcm):
         """Opt-in (audio.debug_save_utterances) copy of the last five raw recordings in

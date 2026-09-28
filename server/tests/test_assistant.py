@@ -15,7 +15,8 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 import wave
 
-from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
+from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phrase, normalize, rms,
+                                   speech_threshold, wake_is_plausible)
 from voice_assistant import agenda
 from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
@@ -71,6 +72,19 @@ class ThresholdTests(unittest.TestCase):
         self.assertEqual(normalize(loud), (loud, 1.0))  # already loud enough
         self.assertEqual(normalize(SILENCE), (SILENCE, 1.0))
         self.assertEqual(normalize(struct.pack('<1280h', *([10] * 1280)))[1], 40.0)  # gain is capped
+
+    def test_wake_needs_phrase_well_above_room(self):
+        audio = dict(AUDIO)
+        self.assertTrue(wake_is_plausible(audio, [49], [4] * 40))      # quietest real wake: 12x
+        self.assertFalse(wake_is_plausible(audio, [172], [42] * 40))   # TV chatter: 4x
+        self.assertFalse(wake_is_plausible(audio, [7], [4] * 40))      # near-silence
+        self.assertTrue(wake_is_plausible(audio, [150], []))           # right after a request
+        self.assertFalse(wake_is_plausible(audio, [10], []))           # still needs an absolute minimum
+
+    def test_cancel_phrases(self):
+        self.assertTrue(is_cancel_phrase('Never mind.'))
+        self.assertTrue(is_cancel_phrase('Cancel'))
+        self.assertFalse(is_cancel_phrase('Cancel my three pm meeting'))
 
     def test_chime_at_start_is_not_speech(self):
         capture = Capture(dict(AUDIO, listen_grace_seconds=0.16))
@@ -383,7 +397,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_flow_persists_id_streams_wav_waits_for_ack(self):
         self.task = asyncio.create_task(self.session.run())
         await self.until('idle')
-        await self.socket.incoming.put(SILENCE)
+        await self.socket.incoming.put(SPEECH)  # the wake phrase: loud enough to count
         await self.until('listening')
         await self.socket.incoming.put(SPEECH + SILENCE * 2)
         events = await self.until('audio_end')
@@ -408,7 +422,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.session.messenger.wait_reply = lambda *args: 'The first sentence is long enough. The second one too.'
         self.task = asyncio.create_task(self.session.run())
         await self.until('idle')
-        await self.socket.incoming.put(SILENCE)
+        await self.socket.incoming.put(SPEECH)  # the wake phrase: loud enough to count
         await self.until('listening')
         await self.socket.incoming.put(SPEECH + SILENCE * 2)
         events = await self.until('audio_end') + await self.until('audio_end')
@@ -448,10 +462,51 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(events[-1]['error'])
         self.assertEqual(self.store.latest()['status'], 'expired')
 
+    async def speak_request(self):
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await self.socket.incoming.put(SPEECH)
+        await self.until('listening')
+        await self.socket.incoming.put(SPEECH + SILENCE * 2)
+
+    async def test_cancel_during_grace_period_sends_nothing(self):
+        self.config['whatsapp']['send_delay_seconds'] = 2
+        await self.speak_request()
+        events = await self.until('confirming')
+        self.assertEqual(events[-1]['send_delay'], 2)
+        await self.socket.incoming.put(json.dumps({'type': 'cancel'}))
+        events = await self.until('idle')
+        self.assertEqual(events[-1]['error'], 'Cancelled')
+        self.assertEqual(self.sent, [])
+
+    async def test_cancel_while_waiting_unsends(self):
+        revoked = []
+        def waiting(request, since, deadline, stop):
+            stop.wait(5)
+            raise InterruptedError('Reply watch cancelled')
+        self.session.messenger.wait_reply = waiting
+        self.session.messenger.revoke = revoked.append
+        await self.speak_request()
+        await self.until('sent')
+        await self.until('waiting')
+        await self.socket.incoming.put(json.dumps({'type': 'cancel'}))
+        events = await self.until('idle')
+        self.assertEqual(events[-1]['error'], 'Cancelled and unsent')
+        self.assertEqual(revoked, ['WA1'])
+        self.assertEqual(self.store.latest()['status'], 'cancelled')
+
+    async def test_spoken_cancel_sends_nothing(self):
+        self.session.engines.transcribe = lambda pcm: 'Never mind.'
+        await self.speak_request()
+        events = await self.until('idle')
+        while events[-1].get('error') != 'Cancelled':
+            events = await self.until('idle')
+        self.assertEqual(self.sent, [])
+
     async def test_silent_capture_does_not_send(self):
         self.task = asyncio.create_task(self.session.run())
         await self.until('idle')
-        await self.socket.incoming.put(SILENCE)
+        await self.socket.incoming.put(SPEECH)  # the wake phrase: loud enough to count
         await self.until('listening')
         await self.socket.incoming.put(SILENCE * 3)
         events = await self.until('idle')
