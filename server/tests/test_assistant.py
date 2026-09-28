@@ -20,7 +20,7 @@ from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phras
 from voice_assistant import agenda
 from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
-from voice_assistant.app import Session, drive_problems, system_stats
+from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.store import Store
 from voice_assistant.whatsapp import WhatsApp
@@ -190,23 +190,6 @@ class SystemStatsTests(unittest.TestCase):
         self.assertTrue(0 <= system_stats()['cpu_percent'] <= 100)  # needs two samples
 
 
-class DriveTests(unittest.TestCase):
-    def test_missing_drives_reported_from_fstab(self):
-        with tempfile.TemporaryDirectory() as temp:
-            devices = Path(temp) / 'by-uuid'
-            devices.mkdir()
-            (devices / 'AAAA').touch()
-            fstab = Path(temp) / 'fstab'
-            fstab.write_text('\n'.join([
-                'PARTUUID=917dde3f-02  /  ext4  defaults,noatime  0  1',
-                'UUID=AAAA  /mnt/shodan   ntfs-3g  defaults,nofail,x-systemd.automount  0  0',
-                'UUID=BBBB  /mnt/backups  ntfs-3g  defaults,nofail  0  0',
-                '# UUID=CCCC  /mnt/old  ext4  defaults,nofail  0  2',
-                'UUID=DDDD  /mnt/required  ext4  defaults  0  2',
-            ]))
-            self.assertEqual(drive_problems(str(fstab), str(devices)), ['backups missing'])
-
-
 class SpeechTests(unittest.TestCase):
     def test_signoff_formatting_and_lists_become_sentences(self):
         self.assertEqual(speakable('Nothing else is due tonight.\r\n\r\nInstinct'), 'Nothing else is due tonight.')
@@ -226,7 +209,7 @@ class SpeechTests(unittest.TestCase):
 
 class FakeBridge(BaseHTTPRequestHandler):
     """Minimal stand-in for the Go bridge's HTTP API."""
-    sent, replies, polls, requests = [], [], 0, []
+    sent, replies, polls, requests, reactions = [], [], 0, [], []
 
     def log_message(self, *args): pass
 
@@ -248,12 +231,13 @@ class FakeBridge(BaseHTTPRequestHandler):
         FakeBridge.polls += 1
         FakeBridge.requests.append(q['request'][0])
         since, after = int(q['since'][0]), int(q['after'][0])
-        self.reply({'messages': [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after]})
+        self.reply({'messages': [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after],
+                    'reactions': [r for r in FakeBridge.reactions if r['seq'] > after]})
 
 
 class WhatsAppTests(unittest.TestCase):
     def setUp(self):
-        FakeBridge.sent, FakeBridge.replies, FakeBridge.polls, FakeBridge.requests = [], [], 0, []
+        FakeBridge.sent, FakeBridge.replies, FakeBridge.polls, FakeBridge.requests, FakeBridge.reactions = [], [], 0, [], []
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FakeBridge)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.client = WhatsApp(dict(bridge_url=f'http://127.0.0.1:{self.server.server_port}/', contact='Instinct',
@@ -279,6 +263,13 @@ class WhatsAppTests(unittest.TestCase):
         reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
         self.assertEqual(reply, 'Two things are due.\n\nLab report and pre-lab.')
         self.assertEqual(FakeBridge.requests[-1], 'ABC')
+
+    def test_reactions_are_reported_not_replies(self):
+        FakeBridge.reactions = [dict(seq=1, reaction='👀', target='ABC')]
+        FakeBridge.replies = [dict(seq=2, timestamp=1001, text='Two things are due.')]
+        seen = []
+        reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event(), seen.append)
+        self.assertEqual((reply, seen), ('Two things are due.', ['👀']))
 
     def test_timeout_and_bridge_down(self):
         with self.assertRaises(TimeoutError):
@@ -486,6 +477,22 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.until('listening')
         await self.socket.incoming.put(SPEECH + SILENCE * 2)
 
+    async def test_reaction_is_announced_before_the_reply(self):
+        def reacting(request, since, deadline, stop, on_reaction=None):
+            on_reaction('👍🏽')  # skin tone still matches 👍
+            on_reaction('👍')    # announced once only
+            time.sleep(0.3)
+            return 'Done.'
+        self.config['whatsapp']['reaction_phrases'] = {'👍': 'On it.'}
+        self.session.messenger.wait_reply = reacting
+        await self.speak_request()
+        events = await self.until('speaking')
+        starts = [e for e in events if isinstance(e, dict) and e.get('type') == 'audio_start']
+        self.assertEqual(len(starts), 1)
+        self.assertTrue(starts[0]['id'].startswith('announce-'))
+        statuses = [e['status'] for e in events if isinstance(e, dict) and e.get('type') == 'status']
+        self.assertEqual(statuses[-2:], ['waiting', 'speaking'])  # still waiting while announcing
+
     async def test_cancel_during_grace_period_sends_nothing(self):
         self.config['whatsapp']['send_delay_seconds'] = 2
         await self.speak_request()
@@ -498,7 +505,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_while_waiting_unsends(self):
         revoked = []
-        def waiting(request, since, deadline, stop):
+        def waiting(request, since, deadline, stop, on_reaction=None):
             stop.wait(5)
             raise InterruptedError('Reply watch cancelled')
         self.session.messenger.wait_reply = waiting
@@ -552,7 +559,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.store.create('<saved@test>', 'Existing request')
         started = threading.Event()
         finished = threading.Event()
-        def waiting(request, since, deadline, stop):
+        def waiting(request, since, deadline, stop, on_reaction=None):
             started.set()
             stop.wait(5)
             finished.set()

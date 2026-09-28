@@ -44,6 +44,7 @@ def load_config(path):
     w = c['whatsapp']
     w.setdefault('instruction', '')
     w.setdefault('send_delay_seconds', 3)
+    w.setdefault('reaction_phrases', {'👀': 'Looking into it.', '👍': 'On it.'})
     if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
         raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
@@ -78,6 +79,11 @@ def load_config(path):
     if bool(c['server'].get('tls_cert')) != bool(c['server'].get('tls_key')):
         raise ValueError('Set both TLS certificate and key')
     return c
+
+
+def canonical_emoji(text):
+    """Emoji without skin-tone modifiers or variation selectors, so 👍🏽 matches 👍."""
+    return re.sub('[\U0001F3FB-\U0001F3FF\uFE0E\uFE0F]', '', text or '')
 
 
 class NoReply(Exception):
@@ -128,31 +134,6 @@ def max_temperature():
     return round(max(readings), 1) if readings else None
 
 
-def drive_problems(fstab='/etc/fstab', devices='/dev/disk/by-uuid'):
-    """Optional (nofail) drives under /mnt from fstab that are missing or read-only, e.g.
-    ['DOCKERUSB read-only', 'shodan missing']. Checks the device itself, so it works whether
-    or not an automount has mounted it yet."""
-    problems = []
-    for line in Path(fstab).read_text().splitlines():
-        fields = line.split()
-        if len(fields) < 4 or line.lstrip().startswith('#') or 'nofail' not in fields[3]:
-            continue
-        source, target = fields[0], fields[1]
-        if not target.startswith('/mnt/') or not source.startswith('UUID='):
-            continue
-        name = target.rsplit('/', 1)[-1]
-        device = Path(devices) / source[5:]
-        if not device.exists():
-            problems.append(f'{name} missing')
-            continue
-        block = device.resolve().name  # e.g. sdb1
-        parent = re.sub(r'p?\d+$', '', block)
-        with suppress(OSError):
-            if Path(f'/sys/block/{parent}/ro').read_text().strip() == '1':
-                problems.append(f'{name} read-only')
-    return problems
-
-
 def system_stats():
     """Pi health for the dashboard; any unreadable source is omitted."""
     stats = {}
@@ -169,8 +150,6 @@ def system_stats():
     with suppress(OSError, ValueError, IndexError):
         stats['uptime_s'] = int(float(Path('/proc/uptime').read_text().split()[0]))
     stats['temp_c'] = max_temperature()
-    with suppress(OSError):
-        stats['drive_problems'] = drive_problems()
     return {k: v for k, v in stats.items() if v is not None}
 
 
@@ -188,6 +167,8 @@ class Session:
         self.reply = ''
         self.message_id = None
         self.error = None
+        self.audio_lock = asyncio.Lock()  # one WAV transfer at a time: replies and announcements
+        self.phrases = {}  # cached announcement audio
         self.cancel = asyncio.Event()  # the Echo's Cancel tap, before sending
         self.abort = threading.Event()  # the same tap while waiting for the reply
 
@@ -258,24 +239,53 @@ class Session:
         parts = chunks(text) or ['I got an empty reply.']
         started, total = time.monotonic(), 0.0
         for seq, part in enumerate(parts):
-            wav, duration = await self.blocking(self.engines.synthesize, part)
-            if len(wav) > 32 * 1024 * 1024:
-                raise ValueError('Synthesized audio exceeds 32 MiB limit')
-            if seq == 0:
-                LOG.info('First of %d speech segments ready after %.1f s', len(parts), time.monotonic() - started)
-            total += duration
-            last = seq == len(parts) - 1
-            await self.event(type='audio_start', id=self.playback_id, seq=seq, last=last, format='wav',
-                             bytes=len(wav), duration_seconds=duration,
-                             volume=self.config.get('tts', {}).get('speech_volume', 1.0))
-            for offset in range(0, len(wav), 32768):
-                await self.ws.send(wav[offset:offset + 32768])
-            await self.event(type='audio_end', id=self.playback_id, seq=seq, last=last)
+            async with self.audio_lock:
+                wav, duration = await self.blocking(self.engines.synthesize, part)
+                if seq == 0:
+                    LOG.info('First of %d speech segments ready after %.1f s', len(parts), time.monotonic() - started)
+                total += duration
+                await self.send_wav(self.playback_id, seq, seq == len(parts) - 1, wav, duration)
         await asyncio.wait_for(self.played.wait(), timeout=total + 30)
         if self.playback_error:
             raise RuntimeError('Client could not play the reply')
         self.playback_id = None
         self.store.update(self.message_id, 'done')
+
+    async def send_wav(self, audio_id, seq, last, wav, duration):
+        if len(wav) > 32 * 1024 * 1024:
+            raise ValueError('Synthesized audio exceeds 32 MiB limit')
+        await self.event(type='audio_start', id=audio_id, seq=seq, last=last, format='wav',
+                         bytes=len(wav), duration_seconds=duration,
+                         volume=self.config.get('tts', {}).get('speech_volume', 1.0))
+        for offset in range(0, len(wav), 32768):
+            await self.ws.send(wav[offset:offset + 32768])
+        await self.event(type='audio_end', id=audio_id, seq=seq, last=last)
+
+    async def announce(self, phrase):
+        """Speak a short status phrase (e.g. for Instinct's 👀 reaction) while still waiting.
+        It has its own audio ID, so it neither needs nor satisfies the reply's playback ack."""
+        try:
+            async with self.audio_lock:
+                if phrase not in self.phrases:
+                    self.phrases[phrase] = await asyncio.to_thread(self.engines.synthesize, phrase)
+                wav, duration = self.phrases[phrase]
+                await self.send_wav(f'announce-{uuid.uuid4().hex[:8]}', 0, True, wav, duration)
+            LOG.info('Announced "%s"', phrase)
+        except Exception as exc:
+            LOG.warning('Announcement failed: %s', type(exc).__name__)
+
+    def reaction_handler(self):
+        """Callback for the reply wait (a worker thread): each configured reaction emoji is
+        announced once per request. Skin tones and variation selectors are ignored."""
+        loop, announced = asyncio.get_running_loop(), set()
+        phrases = {canonical_emoji(k): v for k, v in self.config['whatsapp'].get('reaction_phrases', {}).items()}
+
+        def on_reaction(emoji):
+            emoji = canonical_emoji(emoji)
+            if emoji in phrases and emoji not in announced:
+                announced.add(emoji)
+                asyncio.run_coroutine_threadsafe(self.announce(phrases[emoji]), loop)
+        return on_reaction
 
     def no_reply_message(self):
         seconds = self.config['whatsapp']['reply_timeout_seconds']
@@ -289,7 +299,8 @@ class Session:
         w = self.config['whatsapp']
         try:
             raw = await self.blocking(self.messenger.wait_reply, self.message_id, since or created - 5,
-                                      created + w['reply_timeout_seconds'], AnyEvent(self.stop, self.abort))
+                                      created + w['reply_timeout_seconds'], AnyEvent(self.stop, self.abort),
+                                      self.reaction_handler())
         except TimeoutError as exc:
             self.store.update(self.message_id, 'expired')
             raise NoReply from exc

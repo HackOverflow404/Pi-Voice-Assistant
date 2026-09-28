@@ -58,6 +58,8 @@ type message struct {
 	Text      string `json:"text"`
 	FromMe    bool   `json:"from_me"`
 	Quoted    string `json:"quoted,omitempty"` // ID of the message this one replies to, if quoted
+	Reaction  string `json:"reaction,omitempty"` // emoji, for a reaction to message Target
+	Target    string `json:"target,omitempty"`
 	users     []string
 }
 
@@ -131,6 +133,7 @@ func (b *bridge) repliesTo(c *contact, request string, since, after int64) []mes
 	var found []message
 	for _, m := range chat[begin+1:] {
 		switch {
+		case m.Target != "": // reactions are neither replies nor conversational turns
 		case m.FromMe:
 			quotedOnly = true
 		case m.Quoted != "":
@@ -173,11 +176,6 @@ func (b *bridge) onEvent(evt any) {
 		if v.Info.IsGroup || v.Info.Chat.Server == types.BroadcastServer {
 			return
 		}
-		text := v.Message.GetConversation()
-		if text == "" {
-			text = v.Message.GetExtendedTextMessage().GetText()
-		}
-		// Non-text messages (photos, voice notes) are kept too: they still mark turns.
 		// Every identity the chat partner might appear under (phone JID or LID). The
 		// user's own IDs appear here for sent messages but never match a contact.
 		var users []string
@@ -186,6 +184,16 @@ func (b *bridge) onEvent(evt any) {
 				users = append(users, id.User)
 			}
 		}
+		if r := v.Message.GetReactionMessage(); r != nil {
+			b.record(message{ID: v.Info.ID, Timestamp: v.Info.Timestamp.Unix(), FromMe: v.Info.IsFromMe,
+				Reaction: r.GetText(), Target: r.GetKey().GetID(), users: users})
+			return
+		}
+		text := v.Message.GetConversation()
+		if text == "" {
+			text = v.Message.GetExtendedTextMessage().GetText()
+		}
+		// Non-text messages (photos, voice notes) are kept too: they still mark turns.
 		b.record(message{ID: v.Info.ID, Timestamp: v.Info.Timestamp.Unix(), Text: text,
 			FromMe: v.Info.IsFromMe, Quoted: quotedID(v.Message), users: users})
 	case *events.Connected:
@@ -284,6 +292,18 @@ func pickChat(name string, matches []types.JID) (types.JID, error) {
 	default:
 		return lids[0], nil
 	}
+}
+
+// reactionsTo returns the contact's emoji reactions to `request` after `after`, such as
+// 👀 while it looks into the request or 👍 when it acts on it. Must hold b.mu.
+func (b *bridge) reactionsTo(c *contact, request string, after int64) []message {
+	var found []message
+	for _, m := range b.messages {
+		if m.Target == request && !m.FromMe && m.Reaction != "" && m.Seq > after && c.has(m) {
+			found = append(found, m)
+		}
+	}
+	return found
 }
 
 // startPairing opens a linking session unless one is running: a stream of QR codes,
@@ -524,16 +544,17 @@ func (b *bridge) routes() *http.ServeMux {
 		for {
 			b.mu.Lock()
 			found := b.repliesTo(c, request, since, after)
+			reactions := b.reactionsTo(c, request, after)
 			changed := b.changed
 			b.mu.Unlock()
-			if len(found) > 0 {
-				reply(w, 200, map[string]any{"messages": found})
+			if len(found) > 0 || len(reactions) > 0 {
+				reply(w, 200, map[string]any{"messages": found, "reactions": reactions})
 				return
 			}
 			select {
 			case <-changed:
 			case <-timeout:
-				reply(w, 200, map[string]any{"messages": []message{}})
+				reply(w, 200, map[string]any{"messages": []message{}, "reactions": []message{}})
 				return
 			case <-r.Context().Done():
 				return

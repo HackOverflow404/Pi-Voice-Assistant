@@ -161,7 +161,9 @@ replies count only until you send anything else in that chat, and not at all if 
 previous message there was still unanswered when the request went out (Instinct's next
 message probably answers that). When in doubt it stays silent and reports no reply.
 Answers split across several messages are joined if each follows within
-`reply_settle_seconds`. Every request ends with `whatsapp.instruction`, which asks for plain,
+`reply_settle_seconds`. When the contact reacts to a request with an emoji listed in `whatsapp.reaction_phrases`
+(by default 👀 "Looking into it." and 👍 "On it."), the Echo says that phrase straight
+away, once per emoji; the actual reply is still read when it arrives. Every request ends with `whatsapp.instruction`, which asks for plain,
 unabbreviated sentences with times and room and course numbers written as spoken, since
 the reply is read aloud. The reply is cleaned for speech (sign-off,
 formatting marks, emoji and links removed) and spoken one sentence at a time, so
@@ -230,14 +232,6 @@ The wake-word model occasionally fires on near-silence or on TV and conversation
   the card to discard the request. Saying just "cancel" or "never mind" also discards it.
 - While waiting for the reply, tapping the card cancels the request and deletes the
   WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
-
-## Drive warnings
-
-The Pi also serves USB drives (Samba shares, Docker data). The server reads `/etc/fstab`
-and reports any optional (`nofail`) drive under `/mnt` whose device is missing or has gone
-read-only; the dashboard's Pi pill turns amber and names it. Those fstab entries use
-`x-systemd.automount`, so a drive that drops off USB and returns is remounted on next use
-instead of leaving the share showing an empty folder.
 
 ## Speech services and volume
 

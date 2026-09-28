@@ -34,12 +34,13 @@ class WhatsApp:
         """Delete a sent request for everyone (the user cancelled it)."""
         self.call('POST', '/revoke', {'contact': self.config['contact'], 'id': message_id}, timeout=30)
 
-    def wait_reply(self, request, since, deadline, stop):
+    def wait_reply(self, request, since, deadline, stop, on_reaction=None):
         """The contact's answer to message `request`. The chat also carries unrelated
         conversation, so the bridge decides which messages answer it (see repliesTo in
         bridge/main.go); `since` is the fallback if the bridge no longer knows the request.
         Follow-ups within reply_settle_seconds of the previous one are joined, since chat
-        assistants often answer in several bubbles."""
+        assistants often answer in several bubbles. The contact's emoji reactions to the
+        request are passed to on_reaction as they arrive; they are not the reply."""
         texts, after, settle_until = [], 0, None
         while not stop.is_set():
             end = settle_until or deadline
@@ -50,11 +51,16 @@ class WhatsApp:
             query = urllib.parse.urlencode({'contact': self.config['contact'], 'request': request,
                                             'since': int(since), 'after': after, 'wait': wait})
             try:
-                found = self.call('GET', f'/replies?{query}', timeout=wait + 10)['messages']
+                result = self.call('GET', f'/replies?{query}', timeout=wait + 10)
+                found = result['messages']
             except (OSError, RuntimeError):
                 # Bridge restarting or WhatsApp reconnecting: retry within the deadline.
                 stop.wait(min(3, max(0, end - time.time())))
                 continue
+            for reaction in result.get('reactions') or []:
+                after = max(after, reaction['seq'])
+                if on_reaction:
+                    on_reaction(reaction['reaction'])
             for message in found:
                 texts.append(message['text'])
                 after = max(after, message['seq'])

@@ -34,6 +34,10 @@ whatsapp:
   max_reply_chars: 4000
   # Seconds the Echo shows "Sending in N, tap to cancel" before the request is sent.
   send_delay_seconds: 3
+  # Said as soon as the contact reacts to a request with these emoji; the reply follows.
+  reaction_phrases:
+    "👀": "Looking into it."
+    "👍": "On it."
   # Appended to every spoken request so the reply reads well aloud. Empty to send the words only.
   instruction: "(Spoken request; your reply will be read aloud by text-to-speech. Answer in plain, complete sentences. Write every word out in full: no abbreviations, symbols, emoji, lists or formatting. Write times, dates, and room, course and other numbers the way a person would say them aloud, for example 'eleven fifty-nine PM', 'Siebel twenty-four oh seven A' and 'E C E two ten'.)"
 tts:

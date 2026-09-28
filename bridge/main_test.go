@@ -14,12 +14,14 @@ const (
 )
 
 type step struct {
-	id     string
-	ts     int64
-	text   string
-	fromMe bool
-	quoted string
-	user   string
+	id       string
+	ts       int64
+	text     string
+	fromMe   bool
+	quoted   string
+	user     string
+	reaction string
+	target   string
 }
 
 func chat(steps ...step) *bridge {
@@ -30,7 +32,7 @@ func chat(steps ...step) *bridge {
 			user = instinct
 		}
 		b.record(message{ID: s.id, Timestamp: s.ts, Text: s.text, FromMe: s.fromMe, Quoted: s.quoted,
-			users: []string{user}})
+			Reaction: s.reaction, Target: s.target, users: []string{user}})
 	}
 	return b
 }
@@ -92,6 +94,12 @@ func TestRepliesTo(t *testing.T) {
 			step{id: "A", ts: 105, text: "Two things."},
 			step{id: "B", ts: 106, text: "Lab and pre-lab."}),
 			"R", 0, 2, []string{"B"}},
+		{"reactions are not replies or turns", chat(
+			step{id: "R", ts: 100, text: "what is due?", fromMe: true},
+			step{id: "E", ts: 101, reaction: "👀", target: "R"},
+			step{id: "L", ts: 102, reaction: "❤️", target: "R", fromMe: true},
+			step{id: "A", ts: 105, text: "Two things."}),
+			"R", 0, 0, []string{"A"}},
 		{"unknown request (bridge restarted) reads from since", chat(
 			step{id: "OLD", ts: 90, text: "earlier answer"},
 			step{id: "A", ts: 105, text: "Two things."}),
@@ -124,5 +132,23 @@ func TestPickChat(t *testing.T) {
 	}
 	if _, err := pickChat("Instinct", nil); err == nil {
 		t.Error("no match should fail")
+	}
+}
+
+func TestReactionsTo(t *testing.T) {
+	c := &contact{users: map[string]bool{instinct: true}}
+	b := chat(
+		step{id: "R", ts: 100, text: "what is due?", fromMe: true},
+		step{id: "E", ts: 101, reaction: "👀", target: "R"},
+		step{id: "X", ts: 102, reaction: "👍", target: "OTHER"},
+		step{id: "M", ts: 103, reaction: "👍", target: "R", fromMe: true},
+		step{id: "T", ts: 104, reaction: "👍", target: "R"},
+		step{id: "N", ts: 105, reaction: "👍", target: "R", user: other},
+		step{id: "U", ts: 106, reaction: "", target: "R"}) // reaction removed
+	if got := ids(b.reactionsTo(c, "R", 0)); !reflect.DeepEqual(got, []string{"E", "T"}) {
+		t.Errorf("got %v, want [E T]", got)
+	}
+	if got := ids(b.reactionsTo(c, "R", 2)); !reflect.DeepEqual(got, []string{"T"}) {
+		t.Errorf("after: got %v, want [T]", got)
 	}
 }
