@@ -405,7 +405,17 @@ private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime, modifi
             Text("Pi offline", color = Soft, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             return@Row
         }
-        val strained = (pi!!.memPercent ?: 0.0) >= 85 || (pi.tempC ?: 0.0) >= 75
+        if (pi!!.driveProblems.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Dot(Amber, pulse = true)
+                Spacer(Modifier.width(8.dp))
+                Text("Pi", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+            Text(pi.driveProblems.joinToString(", "), color = Amber, fontSize = 16.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp))
+            return@Row
+        }
+        val strained = (pi.memPercent ?: 0.0) >= 85 || (pi.tempC ?: 0.0) >= 75
         Row(verticalAlignment = Alignment.CenterVertically) {
             Dot(if (strained) Amber else Accent, pulse = false)
             Spacer(Modifier.width(8.dp))

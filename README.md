@@ -231,6 +231,14 @@ The wake-word model occasionally fires on near-silence or on TV and conversation
 - While waiting for the reply, tapping the card cancels the request and deletes the
   WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
 
+## Drive warnings
+
+The Pi also serves USB drives (Samba shares, Docker data). The server reads `/etc/fstab`
+and reports any optional (`nofail`) drive under `/mnt` whose device is missing or has gone
+read-only; the dashboard's Pi pill turns amber and names it. Those fstab entries use
+`x-systemd.automount`, so a drive that drops off USB and returns is remounted on next use
+instead of leaving the share showing an empty folder.
+
 ## Speech services and volume
 
 `stt.engine` and `tts.engine` choose local models (Whisper tiny.en, Piper) or Deepgram

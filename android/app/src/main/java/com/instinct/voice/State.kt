@@ -27,6 +27,8 @@ data class PiStatus(
     val memAvailableMb: Int?, val memTotalMb: Int?, val swapUsedMb: Int?,
     val load1: Double?, val uptimeSeconds: Long?, val tempC: Double?,
     val cpuPercent: Double?, val memPercent: Double?,
+    /** e.g. "shodan missing", "dockerusb read-only": optional drives in the Pi's fstab. */
+    val driveProblems: List<String> = emptyList(),
     val receivedAt: Long = System.currentTimeMillis()
 )
 
@@ -50,7 +52,8 @@ object State {
         fun double(key: String) = if (json.has(key)) json.optDouble(key) else null
         it.copy(pi = PiStatus(int("mem_available_mb"), int("mem_total_mb"), int("swap_used_mb"),
             double("load1"), if (json.has("uptime_s")) json.optLong("uptime_s") else null, double("temp_c"),
-            double("cpu_percent"), double("mem_percent")))
+            double("cpu_percent"), double("mem_percent"),
+            json.optJSONArray("drive_problems")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()))
     }
     fun event(json: JSONObject) = mutable.update {
         val status = json.optString("status", "idle")

@@ -20,7 +20,7 @@ from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phras
 from voice_assistant import agenda
 from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
-from voice_assistant.app import Session, system_stats
+from voice_assistant.app import Session, drive_problems, system_stats
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.store import Store
 from voice_assistant.whatsapp import WhatsApp
@@ -188,6 +188,23 @@ class SystemStatsTests(unittest.TestCase):
         json.dumps(stats)
         time.sleep(0.05)
         self.assertTrue(0 <= system_stats()['cpu_percent'] <= 100)  # needs two samples
+
+
+class DriveTests(unittest.TestCase):
+    def test_missing_drives_reported_from_fstab(self):
+        with tempfile.TemporaryDirectory() as temp:
+            devices = Path(temp) / 'by-uuid'
+            devices.mkdir()
+            (devices / 'AAAA').touch()
+            fstab = Path(temp) / 'fstab'
+            fstab.write_text('\n'.join([
+                'PARTUUID=917dde3f-02  /  ext4  defaults,noatime  0  1',
+                'UUID=AAAA  /mnt/shodan   ntfs-3g  defaults,nofail,x-systemd.automount  0  0',
+                'UUID=BBBB  /mnt/backups  ntfs-3g  defaults,nofail  0  0',
+                '# UUID=CCCC  /mnt/old  ext4  defaults,nofail  0  2',
+                'UUID=DDDD  /mnt/required  ext4  defaults  0  2',
+            ]))
+            self.assertEqual(drive_problems(str(fstab), str(devices)), ['backups missing'])
 
 
 class SpeechTests(unittest.TestCase):

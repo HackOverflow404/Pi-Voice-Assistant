@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import re
 from collections import deque
 from contextlib import suppress
 import hmac
@@ -127,6 +128,31 @@ def max_temperature():
     return round(max(readings), 1) if readings else None
 
 
+def drive_problems(fstab='/etc/fstab', devices='/dev/disk/by-uuid'):
+    """Optional (nofail) drives under /mnt from fstab that are missing or read-only, e.g.
+    ['DOCKERUSB read-only', 'shodan missing']. Checks the device itself, so it works whether
+    or not an automount has mounted it yet."""
+    problems = []
+    for line in Path(fstab).read_text().splitlines():
+        fields = line.split()
+        if len(fields) < 4 or line.lstrip().startswith('#') or 'nofail' not in fields[3]:
+            continue
+        source, target = fields[0], fields[1]
+        if not target.startswith('/mnt/') or not source.startswith('UUID='):
+            continue
+        name = target.rsplit('/', 1)[-1]
+        device = Path(devices) / source[5:]
+        if not device.exists():
+            problems.append(f'{name} missing')
+            continue
+        block = device.resolve().name  # e.g. sdb1
+        parent = re.sub(r'p?\d+$', '', block)
+        with suppress(OSError):
+            if Path(f'/sys/block/{parent}/ro').read_text().strip() == '1':
+                problems.append(f'{name} read-only')
+    return problems
+
+
 def system_stats():
     """Pi health for the dashboard; any unreadable source is omitted."""
     stats = {}
@@ -143,6 +169,8 @@ def system_stats():
     with suppress(OSError, ValueError, IndexError):
         stats['uptime_s'] = int(float(Path('/proc/uptime').read_text().split()[0]))
     stats['temp_c'] = max_temperature()
+    with suppress(OSError):
+        stats['drive_problems'] = drive_problems()
     return {k: v for k, v in stats.items() if v is not None}
 
 
