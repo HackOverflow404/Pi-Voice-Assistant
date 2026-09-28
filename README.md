@@ -179,7 +179,8 @@ voice state and Pi health (CPU temperature, free memory, load), which the server
 every 30 seconds. While the assistant is listening, waiting or speaking, a conversation
 card replaces the calendar and stays for 20 seconds after the reply. The background
 follows sunrise and sunset, and the screen dims from 22:00 to 07:00. The gear icon
-opens the connection settings with Start/Stop. Calendar access needs the
+opens the connection settings with Start/Stop. Text uses the bundled Inter typeface (SIL Open Font License;
+`android/app/src/main/assets/licenses/Inter-OFL.txt`); weather icons are drawn in code. Calendar access needs the
 `READ_CALENDAR` permission: tap the calendar panel, or
 `adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`.
 Weather and calendar are fetched by the Echo itself; the Pi does no extra work.

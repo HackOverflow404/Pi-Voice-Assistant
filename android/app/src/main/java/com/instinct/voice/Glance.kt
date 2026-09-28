@@ -147,18 +147,18 @@ object Glance {
     }
 }
 
-/** WMO weather code to a glyph and label. */
-fun describe(code: Int, isDay: Boolean = true): Pair<String, String> = when (code) {
-    0 -> (if (isDay) "☀️" else "🌙") to "Clear"
-    1 -> (if (isDay) "🌤️" else "🌙") to "Mainly clear"
-    2 -> (if (isDay) "⛅" else "☁️") to "Partly cloudy"
-    3 -> "☁️" to "Overcast"
-    45, 48 -> "🌫️" to "Fog"
-    51, 53, 55, 56, 57 -> "🌦️" to "Drizzle"
-    61, 63, 65, 66, 67 -> "🌧️" to "Rain"
-    71, 73, 75, 77 -> "🌨️" to "Snow"
-    80, 81, 82 -> "🌦️" to "Showers"
-    85, 86 -> "🌨️" to "Snow showers"
-    95, 96, 99 -> "⛈️" to "Thunderstorm"
-    else -> "🌡️" to "—"
+/** WMO weather code to a short label; see WeatherIcon for the glyph. */
+fun condition(code: Int): String = when (code) {
+    0 -> "Clear"
+    1 -> "Mainly clear"
+    2 -> "Partly cloudy"
+    3 -> "Overcast"
+    45, 48 -> "Fog"
+    51, 53, 55, 56, 57 -> "Drizzle"
+    61, 63, 65, 66, 67 -> "Rain"
+    71, 73, 75, 77 -> "Snow"
+    80, 81, 82 -> "Showers"
+    85, 86 -> "Snow showers"
+    95, 96, 99 -> "Thunderstorm"
+    else -> "—"
 }
