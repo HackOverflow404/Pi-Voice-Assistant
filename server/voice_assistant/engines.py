@@ -22,7 +22,7 @@ class Engines:
         tts, stt = tts or {}, stt or {}
         if tts.get('engine') == 'deepgram':
             from .deepgram import DeepgramVoice
-            self.cloud = DeepgramVoice(tts['deepgram_api_key'], tts['deepgram_voice'])
+            self.cloud = DeepgramVoice(tts['deepgram_api_key'], tts['deepgram_voice'], tts.get('deepgram_speed', 1.0))
         if stt.get('engine') == 'deepgram':
             from .deepgram import DeepgramListener
             self.cloud_stt = DeepgramListener(tts['deepgram_api_key'], stt['deepgram_model'])

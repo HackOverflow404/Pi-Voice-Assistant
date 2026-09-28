@@ -287,6 +287,9 @@ class VoiceTests(unittest.TestCase):
             self.assertEqual((query['model'], query['encoding'], query['container']),
                              (['aura-2-thalia-en'], ['linear16'], ['none']))
             self.assertEqual(body, {'text': 'Hello there.'})
+            self.assertNotIn('speed', query)  # default rate is not sent
+            DeepgramVoice('KEY', 'aura-2-orion-en', 1.2, url=voice.url).synthesize('Faster.')
+            self.assertEqual(FakeDeepgram.seen[-1][1]['speed'], ['1.2'])
             self.assertAlmostEqual(duration, 0.1)
             with wave.open(io.BytesIO(data)) as wav:
                 self.assertEqual((wav.getframerate(), wav.getnframes()), (24000, 2400))

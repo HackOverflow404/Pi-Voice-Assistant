@@ -36,6 +36,8 @@ tts:
   deepgram_api_key: ""
   # e.g. aura-2-thalia-en, aura-2-andromeda-en, aura-2-helena-en, aura-2-apollo-en, aura-2-orion-en
   deepgram_voice: aura-2-thalia-en
+  # Speaking rate for Deepgram voices, 0.7-1.5 (1.2 is about 20% faster).
+  deepgram_speed: 1.0
   # The Echo keeps media volume at maximum for Bluetooth speakers; speech plays at this
   # fraction of it (0.01-1).
   speech_volume: 0.3

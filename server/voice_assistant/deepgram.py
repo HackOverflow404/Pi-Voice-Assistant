@@ -37,14 +37,16 @@ class DeepgramListener:
 
 
 class DeepgramVoice:
-    def __init__(self, api_key, voice, url=API, timeout=8):
-        self.api_key, self.voice, self.url, self.timeout = api_key, voice, url, timeout
+    def __init__(self, api_key, voice, speed=1.0, url=API, timeout=8):
+        self.api_key, self.voice, self.speed, self.url, self.timeout = api_key, voice, speed, url, timeout
 
     def synthesize(self, text):
         """WAV bytes and duration. Raw PCM is requested and wrapped locally so the WAV header
         always states the true length."""
-        query = urllib.parse.urlencode({'model': self.voice, 'encoding': 'linear16',
-                                        'sample_rate': RATE, 'container': 'none'})
+        params = {'model': self.voice, 'encoding': 'linear16', 'sample_rate': RATE, 'container': 'none'}
+        if self.speed != 1.0:
+            params['speed'] = self.speed
+        query = urllib.parse.urlencode(params)
         pcm = post(f'{self.url}?{query}', self.api_key, json.dumps({'text': text}).encode(),
                    'application/json', self.timeout)
         if len(pcm) < 2:

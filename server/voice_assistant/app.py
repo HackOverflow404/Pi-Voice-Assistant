@@ -49,6 +49,9 @@ def load_config(path):
     tts.setdefault('engine', 'piper')
     tts.setdefault('deepgram_voice', 'aura-2-thalia-en')
     tts.setdefault('speech_volume', 0.3)
+    tts.setdefault('deepgram_speed', 1.0)
+    if not 0.7 <= tts['deepgram_speed'] <= 1.5:
+        raise ValueError('tts.deepgram_speed must be between 0.7 and 1.5')
     if not 0.01 <= tts['speech_volume'] <= 1:
         raise ValueError('tts.speech_volume must be between 0.01 and 1')
     if tts['engine'] not in ('piper', 'deepgram') or (tts['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
