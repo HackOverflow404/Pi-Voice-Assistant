@@ -3,6 +3,7 @@
 The Echo can't sync Google Calendar without Play Services, so the Pi reads the calendars'
 secret iCal links and sends the events over the existing WebSocket."""
 import datetime as dt
+import html
 import logging
 import urllib.request
 
@@ -41,9 +42,10 @@ def events_between(ics, start, end, color):
         all_day = not isinstance(begin, dt.datetime)
         if finish is None:
             finish = begin + (dt.timedelta(days=1) if all_day else dt.timedelta(0))
-        found.append(dict(title=str(event.get('SUMMARY', '(No title)')), begin=epoch_ms(begin, zone),
-                          end=epoch_ms(finish, zone), all_day=all_day,
-                          location=str(event.get('LOCATION', '')), color=color))
+        # Google's feeds carry HTML entities in text fields ("Algs &amp; Models").
+        found.append(dict(title=html.unescape(str(event.get('SUMMARY', '(No title)'))),
+                          begin=epoch_ms(begin, zone), end=epoch_ms(finish, zone), all_day=all_day,
+                          location=html.unescape(str(event.get('LOCATION', ''))), color=color))
     return found
 
 

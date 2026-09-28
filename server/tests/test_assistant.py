@@ -114,7 +114,7 @@ END:VEVENT
 BEGIN:VEVENT
 UID:demo
 DTSTART:20260928T182000Z
-SUMMARY:CS 425 MP2 Demo
+SUMMARY:CS 425 MP2 Demo &amp; Q&amp;A
 END:VEVENT
 END:VCALENDAR
 """
@@ -128,7 +128,7 @@ class AgendaTests(unittest.TestCase):
             events = agenda.load(['https://calendar.test/private.ics'], MONDAY)
         titles = [(e['title'], e['all_day']) for e in events]
         self.assertEqual(titles, [('Fall break', True), ('Analog Signal Processing', False),
-                                  ('CS 425 MP2 Demo', False)])
+                                  ('CS 425 MP2 Demo & Q&A', False)])
         lesson = events[1]
         self.assertEqual(dt.datetime.fromtimestamp(lesson['begin'] / 1000, CHICAGO),
                          dt.datetime(2026, 9, 28, 9, 0, tzinfo=CHICAGO))
