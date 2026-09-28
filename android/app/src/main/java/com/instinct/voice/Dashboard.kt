@@ -22,6 +22,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -43,6 +44,8 @@ private val Amber = Color(0xFFF2C14E)
 private val Red = Color(0xFFEF6F6C)
 
 private val clockFormat = DateTimeFormatter.ofPattern("HH:mm")
+private val Tabular = TextStyle(fontFeatureSettings = "tnum")
+private val secondsFormat = DateTimeFormatter.ofPattern(":ss")
 private val dateFormat = DateTimeFormatter.ofPattern("EEEE, d MMMM")
 
 private fun Double.deg() = "${roundToInt()}°"
@@ -81,8 +84,14 @@ fun GlanceDashboard(
         Column(Modifier.fillMaxSize().alpha(if (night) 0.55f else 1f).padding(horizontal = 28.dp, vertical = 18.dp)) {
             Row(Modifier.weight(1f)) {
                 Column(Modifier.weight(1.1f).fillMaxHeight()) {
-                    Text(now.format(clockFormat), color = Ink, fontSize = 92.sp, fontWeight = FontWeight.Light,
-                        letterSpacing = (-2).sp, lineHeight = 92.sp)
+                    // Tabular digits keep the clock from shifting as the seconds tick.
+                    Row {
+                        Text(now.format(clockFormat), color = Ink, fontSize = 92.sp, fontWeight = FontWeight.Light,
+                            letterSpacing = (-2).sp, lineHeight = 92.sp, style = Tabular,
+                            modifier = Modifier.alignByBaseline())
+                        Text(now.format(secondsFormat), color = Soft, fontSize = 36.sp, fontWeight = FontWeight.Light,
+                            style = Tabular, modifier = Modifier.alignByBaseline().padding(start = 6.dp))
+                    }
                     Text(now.format(dateFormat), color = Soft, fontSize = 20.sp)
                     Spacer(Modifier.weight(1f))
                     WeatherBlock(weather, weatherError, now)
