@@ -85,7 +85,7 @@ fun GlanceDashboard(
                         letterSpacing = (-2).sp, lineHeight = 92.sp)
                     Text(now.format(dateFormat), color = Soft, fontSize = 20.sp)
                     Spacer(Modifier.weight(1f))
-                    WeatherBlock(weather, weatherError)
+                    WeatherBlock(weather, weatherError, now)
                 }
                 Spacer(Modifier.width(24.dp))
                 AnimatedContent(conversation, Modifier.weight(1f).fillMaxHeight(),
@@ -100,7 +100,7 @@ fun GlanceDashboard(
 }
 
 @Composable
-private fun WeatherBlock(weather: Weather?, error: String?) {
+private fun WeatherBlock(weather: Weather?, error: String?, now: LocalDateTime) {
     if (weather == null) {
         Text(if (error != null) "Weather unavailable" else "Loading weather…", color = Faint, fontSize = 16.sp)
         return
@@ -121,7 +121,8 @@ private fun WeatherBlock(weather: Weather?, error: String?) {
     }
     Spacer(Modifier.height(8.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        for (hour in weather.hours) {
+        val nextHour = now.withMinute(0).withSecond(0).withNano(0).plusHours(1)
+        for (hour in weather.hours.filter { !it.time.isBefore(nextHour) }.take(6)) {
             val sun = weather.sunrise?.let { rise -> weather.sunset?.let { set ->
                 hour.time.toLocalTime().let { it >= rise.toLocalTime() && it < set.toLocalTime() } } } ?: true
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -137,7 +138,7 @@ private fun WeatherBlock(weather: Weather?, error: String?) {
 @Composable
 private fun CalendarPanel(events: List<Event>, allowed: Boolean, now: LocalDateTime, onAllow: () -> Unit) {
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp)).background(Panel).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        verticalArrangement = Arrangement.spacedBy(6.dp)) {
         if (!allowed) {
             Text("Calendar", color = Soft, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             Text("Tap to allow calendar access", color = Ink, fontSize = 16.sp,
@@ -148,20 +149,29 @@ private fun CalendarPanel(events: List<Event>, allowed: Boolean, now: LocalDateT
         val zone = ZoneId.systemDefault()
         val today = now.toLocalDate()
         val byDay = events.groupBy { Instant.ofEpochMilli(it.begin).atZone(zone).toLocalDate().coerceAtLeast(today) }
+        // The panel fits about four event rows; the empty-today line takes the place of one.
+        val cap = if (byDay[today].isNullOrEmpty()) 3 else 4
         var shown = 0
         for (day in listOf(today, today.plusDays(1))) {
             val list = byDay[day].orEmpty()
-            if (day != today && list.isEmpty()) continue
+            if (day != today && (list.isEmpty() || shown >= cap)) continue
             Text(if (day == today) "Today" else "Tomorrow", color = Soft, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             if (list.isEmpty()) Text("Nothing else scheduled", color = Faint, fontSize = 15.sp)
             for (event in list) {
-                if (shown >= 5) break
+                if (shown >= cap) break
                 EventRow(event, zone, now)
                 shown++
             }
         }
         if (events.size > shown) Text("+${events.size - shown} more", color = Faint, fontSize = 12.sp)
     }
+}
+
+/** University-style "Campus: X Building: Y Room: Z" locations shortened to "Y Z". */
+private fun shortLocation(location: String): String {
+    val building = location.substringAfter("Building:", "").trim()
+    if (building.isEmpty()) return location
+    return building.replace(Regex("""\s*Room:\s*"""), " ").trim()
 }
 
 private fun LocalDate.coerceAtLeast(other: LocalDate) = if (isBefore(other)) other else this
@@ -183,7 +193,7 @@ private fun EventRow(event: Event, zone: ZoneId, now: LocalDateTime) {
         Text(time, color = if (happening) Accent else Soft, fontSize = 14.sp, modifier = Modifier.width(56.dp))
         Column {
             Text(event.title, color = Ink, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (event.location.isNotBlank()) Text(event.location, color = Faint, fontSize = 12.sp,
+            if (event.location.isNotBlank()) Text(shortLocation(event.location), color = Faint, fontSize = 12.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }

@@ -83,11 +83,12 @@ object Glance {
         val daily = json.getJSONObject("daily")
         val hourly = json.getJSONObject("hourly")
         val times = hourly.getJSONArray("time")
-        val nextHour = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0).plusHours(1)
+        // Keep a day of hours; the dashboard picks the next six as the clock advances.
+        val thisHour = LocalDateTime.now().withMinute(0).withSecond(0).withNano(0)
         val hours = (0 until times.length()).asSequence()
             .map { i -> i to LocalDateTime.parse(times.getString(i)) }
-            .filter { (_, time) -> !time.isBefore(nextHour) }
-            .take(6)
+            .filter { (_, time) -> !time.isBefore(thisHour) }
+            .take(24)
             .map { (i, time) ->
                 Hour(time, hourly.getJSONArray("temperature_2m").getDouble(i),
                     hourly.getJSONArray("weather_code").getInt(i),

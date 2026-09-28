@@ -106,6 +106,8 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(calendarAllowed) {
                 while (true) {
+                    // Also notices a permission granted over adb, which does not resume the activity.
+                    calendarAllowed = Glance.canReadCalendar(this@MainActivity)
                     events = withContext(Dispatchers.IO) {
                         runCatching { Glance.events(this@MainActivity) }.getOrDefault(events)
                     }
