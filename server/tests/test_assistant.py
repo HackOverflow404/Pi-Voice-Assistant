@@ -149,7 +149,7 @@ MONDAY = dt.datetime(2026, 9, 28, 1, 0, tzinfo=CHICAGO)
 class AgendaTests(unittest.TestCase):
     def test_expands_recurrences_for_today_and_tomorrow(self):
         with patch.object(agenda, 'fetch', return_value=ICS):
-            events = agenda.load(['https://calendar.test/private.ics'], MONDAY)
+            events = agenda.load(['https://calendar.test/private.ics'], MONDAY, days=2)
         titles = [(e['title'], e['all_day']) for e in events]
         self.assertEqual(titles, [('Fall break', True), ('Analog Signal Processing', False),
                                   ('CS 425 MP2 Demo & Q&A', False)])
@@ -168,7 +168,8 @@ class AgendaTests(unittest.TestCase):
                 raise OSError('unreachable')
             return ICS
         with patch.object(agenda, 'fetch', side_effect=flaky):
-            self.assertEqual(len(agenda.load(['https://bad.test', 'https://good.test'], MONDAY)), 3)
+            self.assertEqual(len(agenda.load(['https://bad.test', 'https://good.test'], MONDAY, days=2)), 3)
+            self.assertEqual(len(agenda.load(['https://good.test'], MONDAY)), 4)  # a week adds Wednesday's class; 5 Oct is outside
             self.assertIsNone(agenda.load(['https://bad.test'], MONDAY))  # keep the old events
         shared = agenda.Shared()
         shared.update(None)

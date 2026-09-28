@@ -59,13 +59,13 @@ class Shared:
             self.events, self.version = events, self.version + 1
 
 
-def load(urls, now=None):
-    """Events from today's local midnight for two days, sorted all-day first then by start.
+def load(urls, now=None, days=7):
+    """Events from today's local midnight for `days` days, sorted all-day first then by start.
     A calendar that fails to load is skipped (and logged); if all fail, returns None so the
     dashboard keeps what it has instead of showing an empty day."""
     now = now or dt.datetime.now().astimezone()
     start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + dt.timedelta(days=2)
+    end = start + dt.timedelta(days=days)
     events, loaded = [], 0
     for index, url in enumerate(urls):
         try:
