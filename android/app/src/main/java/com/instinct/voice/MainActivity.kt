@@ -113,7 +113,9 @@ class MainActivity : ComponentActivity() {
             }
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF72DCCA),
                 background = Color(0xFF10191E), surface = Color(0xFF1C292F))) {
-                GlanceDashboard(state, weather, weatherError, events, calendarAllowed,
+                // The Pi's iCal feed wins when configured: the Echo's own calendar needs Play Services.
+                val piEvents = state.calendar
+                GlanceDashboard(state, weather, weatherError, piEvents ?: events, piEvents != null || calendarAllowed,
                     onAllowCalendar = { permissions.launch(arrayOf(Manifest.permission.READ_CALENDAR)) },
                     onSettings = { showSettings = true })
                 if (showSettings) SettingsDialog(settings, state, onDismiss = { showSettings = false })

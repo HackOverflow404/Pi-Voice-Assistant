@@ -246,7 +246,7 @@ private fun relative(fromMs: Long, toMs: Long): String {
 }
 
 @Composable
-private fun AgendaCard(events: List<Event>, allowed: Boolean, now: LocalDateTime, onAllow: () -> Unit) {
+private fun AgendaCard(allEvents: List<Event>, allowed: Boolean, now: LocalDateTime, onAllow: () -> Unit) {
     Column(Modifier.fillMaxSize().glass().padding(22.dp)) {
         if (!allowed) {
             Label("Calendar")
@@ -258,6 +258,7 @@ private fun AgendaCard(events: List<Event>, allowed: Boolean, now: LocalDateTime
         val zone = ZoneId.systemDefault()
         val nowMs = now.atZone(zone).toInstant().toEpochMilli()
         val today = now.toLocalDate()
+        val events = allEvents.filter { it.end > nowMs }  // drop events the moment they end
         val next = events.firstOrNull { !it.allDay }
         if (next == null) {
             Label("Up next")

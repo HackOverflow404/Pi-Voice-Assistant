@@ -24,6 +24,11 @@ class Store:
                             (status, reply, message_id))
         self.db.commit()
 
+    def rename(self, old_id, new_id):
+        """Replace the local placeholder ID with the ID the message was sent under."""
+        self.db.execute('UPDATE requests SET message_id=? WHERE message_id=?', (new_id, old_id))
+        self.db.commit()
+
     def latest(self):
         self.db.row_factory = sqlite3.Row
         row = self.db.execute('SELECT * FROM requests ORDER BY created DESC LIMIT 1').fetchone()

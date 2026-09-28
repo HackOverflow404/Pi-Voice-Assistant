@@ -1,4 +1,5 @@
 import asyncio
+import datetime as dt
 from contextlib import suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -9,10 +10,13 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 import wave
 
 from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
+from voice_assistant import agenda
 from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.store import Store
@@ -76,6 +80,80 @@ class ThresholdTests(unittest.TestCase):
         self.assertFalse(default.speech)
 
 
+ICS = b"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+X-WR-TIMEZONE:America/Chicago
+BEGIN:VEVENT
+UID:class
+DTSTART;TZID=America/Chicago:20260907T090000
+DTEND;TZID=America/Chicago:20260907T105000
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE
+SUMMARY:Analog Signal Processing
+LOCATION:ECEB 4072
+END:VEVENT
+BEGIN:VEVENT
+UID:holiday
+DTSTART;VALUE=DATE:20260929
+DTEND;VALUE=DATE:20260930
+SUMMARY:Fall break
+END:VEVENT
+BEGIN:VEVENT
+UID:cancelled
+DTSTART:20260928T180000Z
+DTEND:20260928T190000Z
+STATUS:CANCELLED
+SUMMARY:Cancelled meeting
+END:VEVENT
+BEGIN:VEVENT
+UID:later
+DTSTART:20261005T180000Z
+DTEND:20261005T190000Z
+SUMMARY:Next week
+END:VEVENT
+BEGIN:VEVENT
+UID:demo
+DTSTART:20260928T182000Z
+SUMMARY:CS 425 MP2 Demo
+END:VEVENT
+END:VCALENDAR
+"""
+CHICAGO = ZoneInfo('America/Chicago')
+MONDAY = dt.datetime(2026, 9, 28, 1, 0, tzinfo=CHICAGO)
+
+
+class AgendaTests(unittest.TestCase):
+    def test_expands_recurrences_for_today_and_tomorrow(self):
+        with patch.object(agenda, 'fetch', return_value=ICS):
+            events = agenda.load(['https://calendar.test/private.ics'], MONDAY)
+        titles = [(e['title'], e['all_day']) for e in events]
+        self.assertEqual(titles, [('Fall break', True), ('Analog Signal Processing', False),
+                                  ('CS 425 MP2 Demo', False)])
+        lesson = events[1]
+        self.assertEqual(dt.datetime.fromtimestamp(lesson['begin'] / 1000, CHICAGO),
+                         dt.datetime(2026, 9, 28, 9, 0, tzinfo=CHICAGO))
+        self.assertEqual(lesson['location'], 'ECEB 4072')
+        holiday = events[0]
+        self.assertEqual(dt.datetime.fromtimestamp(holiday['begin'] / 1000, CHICAGO),
+                         dt.datetime(2026, 9, 29, 0, 0, tzinfo=CHICAGO))  # local midnight
+        self.assertEqual(events[2]['end'], events[2]['begin'])  # no DTEND: zero length
+
+    def test_failed_calendars(self):
+        def flaky(url):
+            if 'bad' in url:
+                raise OSError('unreachable')
+            return ICS
+        with patch.object(agenda, 'fetch', side_effect=flaky):
+            self.assertEqual(len(agenda.load(['https://bad.test', 'https://good.test'], MONDAY)), 3)
+            self.assertIsNone(agenda.load(['https://bad.test'], MONDAY))  # keep the old events
+        shared = agenda.Shared()
+        shared.update(None)
+        self.assertEqual((shared.events, shared.version), (None, 0))
+        shared.update([])
+        shared.update([])
+        self.assertEqual(shared.version, 1)
+
+
 class SystemStatsTests(unittest.TestCase):
     def test_reports_memory_and_load(self):
         stats = system_stats()
@@ -104,7 +182,7 @@ class SpeechTests(unittest.TestCase):
 
 class FakeBridge(BaseHTTPRequestHandler):
     """Minimal stand-in for the Go bridge's HTTP API."""
-    sent, replies, polls = [], [], 0
+    sent, replies, polls, requests = [], [], 0, []
 
     def log_message(self, *args): pass
 
@@ -124,13 +202,14 @@ class FakeBridge(BaseHTTPRequestHandler):
     def do_GET(self):
         q = parse_qs(urlparse(self.path).query)
         FakeBridge.polls += 1
+        FakeBridge.requests.append(q['request'][0])
         since, after = int(q['since'][0]), int(q['after'][0])
         self.reply({'messages': [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after]})
 
 
 class WhatsAppTests(unittest.TestCase):
     def setUp(self):
-        FakeBridge.sent, FakeBridge.replies, FakeBridge.polls = [], [], 0
+        FakeBridge.sent, FakeBridge.replies, FakeBridge.polls, FakeBridge.requests = [], [], 0, []
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FakeBridge)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.client = WhatsApp(dict(bridge_url=f'http://127.0.0.1:{self.server.server_port}/', contact='Instinct',
@@ -141,22 +220,23 @@ class WhatsAppTests(unittest.TestCase):
         self.server.server_close()
 
     def test_send_names_contact_and_returns_timestamp(self):
-        self.assertEqual(self.client.send('What is due?'), 1000)
+        self.assertEqual(self.client.send('What is due?'), {'id': 'ABC', 'timestamp': 1000})
         self.assertEqual(FakeBridge.sent, [{'contact': 'Instinct', 'text': 'What is due?'}])
 
     def test_joins_multi_bubble_reply_and_ignores_older_messages(self):
         FakeBridge.replies = [dict(seq=1, timestamp=990, text='Old answer'),
                               dict(seq=2, timestamp=1001, text='Two things are due.'),
                               dict(seq=3, timestamp=1002, text='Lab report and pre-lab.')]
-        reply = self.client.wait_reply(1000, time.time() + 5, threading.Event())
+        reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
         self.assertEqual(reply, 'Two things are due.\n\nLab report and pre-lab.')
+        self.assertEqual(FakeBridge.requests[-1], 'ABC')
 
     def test_timeout_and_bridge_down(self):
         with self.assertRaises(TimeoutError):
-            self.client.wait_reply(1000, time.time() + 1.5, threading.Event())
+            self.client.wait_reply('ABC', 1000, time.time() + 1.5, threading.Event())
         down = WhatsApp(dict(bridge_url='http://127.0.0.1:9', contact='Instinct', reply_settle_seconds=0))
         with self.assertRaises(TimeoutError):
-            down.wait_reply(1000, time.time() + 1, threading.Event())
+            down.wait_reply('ABC', 1000, time.time() + 1, threading.Event())
 
 
 class FakeSocket:
@@ -192,7 +272,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.config = {'audio': dict(AUDIO), 'whatsapp': whatsapp, 'state_dir': self.temp.name}
         self.session = Session(self.socket, self.config, FakeEngines(), self.store)
         self.sent = []
-        self.session.messenger.send = lambda text: self.sent.append(text) or 1000
+        self.session.messenger.send = lambda text: self.sent.append(text) or {'id': 'WA1', 'timestamp': 1000}
         self.session.messenger.wait_reply = lambda *args: 'It is sunny.\r\n\r\nInstinct'
         self.task = None
 
@@ -228,6 +308,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with wave.open(io.BytesIO(data), 'rb') as wav:
             self.assertEqual(wav.getnframes(), 1280)
         self.assertEqual(self.sent, ['What is the weather?'])
+        self.assertEqual(self.store.latest()['message_id'], 'WA1')  # replies are matched to WhatsApp's ID
         self.assertEqual(self.store.latest()['status'], 'replied')
         self.assertEqual(self.store.latest()['reply'], 'It is sunny.')  # sign-off stripped
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': 'wrong'}))
@@ -294,6 +375,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         events = await self.until('system')
         self.assertIn('mem_available_mb', events[-1])
 
+    async def test_session_sends_calendar_when_it_changes(self):
+        shared = agenda.Shared()
+        shared.update([dict(title='Demo', begin=1, end=2, all_day=False, location='', color=0)])
+        self.session.calendar = shared
+        self.task = asyncio.create_task(self.session.run())
+        events = await self.until('calendar')
+        self.assertEqual(events[-1]['events'][0]['title'], 'Demo')
+
     async def test_invalid_pcm_closes_socket(self):
         await self.socket.incoming.put(b'\x01')
         await self.session.receive()
@@ -303,7 +392,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.store.create('<saved@test>', 'Existing request')
         started = threading.Event()
         finished = threading.Event()
-        def waiting(since, deadline, stop):
+        def waiting(request, since, deadline, stop):
             started.set()
             stop.wait(5)
             finished.set()

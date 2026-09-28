@@ -139,12 +139,28 @@ a device → Link with phone number instead** and enter it:
 ssh tps-l2 'curl -sS -X POST 127.0.0.1:8766/pair -d "{\"phone\": \"15551234567\"}"'
 ssh tps-l2 'curl -sS 127.0.0.1:8766/status'            # {"paired":true,"connected":true,...}
 ssh tps-l2 'curl -sS "127.0.0.1:8766/contacts?q=instinct"'
+ssh tps-l2 'curl -sS "127.0.0.1:8766/chat?contact=Instinct"'  # recent messages, for debugging
+```
+
+If the pairing code is rejected ("Couldn't link device"), scan a QR code instead:
+tunnel the bridge to this machine and open its page, then use **Link a device** and scan.
+
+```sh
+ssh -N -L 18766:127.0.0.1:8766 tps-l2 &
+xdg-open http://127.0.0.1:18766/qr
 ```
 
 `whatsapp.contact` matches a contact, push or business name (exactly, then as a
-substring) or takes a phone number with country code. The reply is the contact's
-first message after yours; further messages that each follow within
-`reply_settle_seconds` are joined to it. The reply is cleaned for speech (sign-off,
+substring) or takes a phone number with country code.
+
+The chat may also hold conversation typed on your phone, so the bridge tracks it in
+both directions and only reads out answers to the voice request: a reply that quotes
+the request always counts, and one quoting another message never does. Unquoted
+replies count only until you send anything else in that chat, and not at all if your
+previous message there was still unanswered when the request went out (Instinct's next
+message probably answers that). When in doubt it stays silent and reports no reply.
+Answers split across several messages are joined if each follows within
+`reply_settle_seconds`. The reply is cleaned for speech (sign-off,
 formatting marks, emoji and links removed) and spoken one sentence at a time, so
 playback starts after the first sentence is synthesized. Unlinking the device on the
 phone logs the bridge out; pair again to restore it.
@@ -192,10 +208,14 @@ every 30 seconds. While the assistant is listening, waiting or speaking, a conve
 card replaces the calendar and stays for 20 seconds after the reply. The background
 follows sunrise and sunset. The app never dims the screen. A long press
 anywhere opens the connection settings with Start/Stop. Text uses the bundled Inter typeface (SIL Open Font License;
-`android/app/src/main/assets/licenses/Inter-OFL.txt`); weather icons are drawn in code. Calendar access needs the
-`READ_CALENDAR` permission: tap the calendar panel, or
-`adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`.
-Weather and calendar are fetched by the Echo itself; the Pi does no extra work.
+`android/app/src/main/assets/licenses/Inter-OFL.txt`); weather icons are drawn in code. Events come from the private
+iCal links in `calendar.ical_urls` on the Pi: the server expands recurring events
+(icalendar, recurring-ical-events), refreshes every `refresh_minutes`, and sends today's
+and tomorrow's events to the Echo; a calendar that fails to load is skipped. With no links
+configured the Echo reads its own synced calendars instead, which needs Google Play
+services and the `READ_CALENDAR` permission (tap the calendar panel, or
+`adb shell pm grant com.instinct.voice android.permission.READ_CALENDAR`). Weather is
+fetched by the Echo itself.
 
 ## Install on Echo Show 5 / LineageOS (Android 11–13)
 

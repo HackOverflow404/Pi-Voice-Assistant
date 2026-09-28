@@ -24,12 +24,14 @@ class WhatsApp:
             raise RuntimeError(f'WhatsApp bridge {exc.code}: {detail}') from exc
 
     def send(self, text):
-        """Send `text` to the contact; returns WhatsApp's timestamp for the message."""
-        return self.call('POST', '/send', {'contact': self.config['contact'], 'text': text}, timeout=30)['timestamp']
+        """Send `text` to the contact; returns WhatsApp's {"id", "timestamp"} for it."""
+        return self.call('POST', '/send', {'contact': self.config['contact'], 'text': text}, timeout=30)
 
-    def wait_reply(self, since, deadline, stop):
-        """First reply from the contact sent at or after `since`. Follow-up messages that
-        arrive within reply_settle_seconds of the previous one are joined to it, since chat
+    def wait_reply(self, request, since, deadline, stop):
+        """The contact's answer to message `request`. The chat also carries unrelated
+        conversation, so the bridge decides which messages answer it (see repliesTo in
+        bridge/main.go); `since` is the fallback if the bridge no longer knows the request.
+        Follow-ups within reply_settle_seconds of the previous one are joined, since chat
         assistants often answer in several bubbles."""
         texts, after, settle_until = [], 0, None
         while not stop.is_set():
@@ -38,8 +40,8 @@ class WhatsApp:
             if remaining <= 0:
                 break
             wait = max(1, min(20, int(remaining)))
-            query = urllib.parse.urlencode({'contact': self.config['contact'], 'since': int(since),
-                                            'after': after, 'wait': wait})
+            query = urllib.parse.urlencode({'contact': self.config['contact'], 'request': request,
+                                            'since': int(since), 'after': after, 'wait': wait})
             try:
                 found = self.call('GET', f'/replies?{query}', timeout=wait + 10)['messages']
             except (OSError, RuntimeError):

@@ -159,6 +159,7 @@ class VoiceService : Service() {
                                 muted = json.optString("status") !in listOf("idle", "listening")
                             }
                             "system" -> State.system(json)
+                            "calendar" -> State.calendar(json)
                             "audio_start" -> {
                                 check(output == null) { "Overlapping audio transfer" }
                                 audioId = json.getString("id")

@@ -27,4 +27,11 @@ whatsapp:
   # Replies split across several messages are joined if each follows within this time.
   reply_settle_seconds: 3
   max_reply_chars: 4000
+calendar:
+  # Private iCal addresses shown on the dashboard. Google Calendar: Settings -> your
+  # calendar -> Integrate calendar -> "Secret address in iCal format". Anyone with the
+  # link can read the calendar, so keep this file private. Empty: the Echo uses its own
+  # synced calendars instead (which needs Google Play services on the Echo).
+  ical_urls: []
+  refresh_minutes: 5
 state_dir: state

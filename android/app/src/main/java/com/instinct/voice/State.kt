@@ -13,7 +13,9 @@ data class Dashboard(
     val reply: String = "",
     val error: String = "",
     val running: Boolean = false,
-    val pi: PiStatus? = null
+    val pi: PiStatus? = null,
+    /** Events the Pi reads from the configured iCal links; null until it sends any. */
+    val calendar: List<Event>? = null
 )
 
 /** Pi health from the server's periodic `system` message; null fields were unavailable. */
@@ -30,6 +32,14 @@ object State {
         it.copy(connection = value, error = error)
     }
     fun running(value: Boolean) = mutable.update { it.copy(running = value) }
+    fun calendar(json: JSONObject) = mutable.update {
+        val list = json.getJSONArray("events")
+        it.copy(calendar = (0 until list.length()).map { i ->
+            val e = list.getJSONObject(i)
+            Event(e.optString("title", "(No title)"), e.getLong("begin"), e.getLong("end"),
+                e.optBoolean("all_day"), e.optLong("color", 0).toInt(), e.optString("location"))
+        })
+    }
     fun system(json: JSONObject) = mutable.update {
         fun int(key: String) = if (json.has(key)) json.optInt(key) else null
         fun double(key: String) = if (json.has(key)) json.optDouble(key) else null

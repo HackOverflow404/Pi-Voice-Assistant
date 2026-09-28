@@ -13,6 +13,7 @@ import time
 import uuid
 import wave
 
+from . import agenda
 from .audio import FRAME_SECONDS, Capture, Framer, normalize, rms, speech_threshold
 from .speech import chunks, speakable
 from .store import Store
@@ -42,6 +43,12 @@ def load_config(path):
     if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
         raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
+    cal = c.setdefault('calendar', {}) or {}
+    c['calendar'] = cal
+    cal.setdefault('ical_urls', [])
+    cal.setdefault('refresh_minutes', 5)
+    if not (isinstance(cal['ical_urls'], list) and 1 <= cal['refresh_minutes'] <= 1440):
+        raise ValueError('calendar.ical_urls must be a list and refresh_minutes 1-1440')
     c['state_dir'] = str((path.parent / c['state_dir']).resolve())
     for key in ('tls_cert', 'tls_key'):
         if c['server'].get(key):
@@ -73,8 +80,9 @@ def system_stats():
 
 
 class Session:
-    def __init__(self, ws, config, engines, store):
+    def __init__(self, ws, config, engines, store, calendar=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
+        self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         self.messenger = WhatsApp(config['whatsapp'])
         self.queue = asyncio.Queue(maxsize=25)  # 2 seconds maximum backlog
         self.stop = threading.Event()
@@ -171,13 +179,13 @@ class Session:
         return f'No reply within {seconds // 60} min' if seconds >= 60 else f'No reply within {seconds} s'
 
     async def wait_and_speak(self, created, since=None):
-        """Wait for the contact's reply to the request created at `created`. `since` is
-        WhatsApp's timestamp for the sent message; after a restart only the local creation
-        time is known, so allow a few seconds of clock skew."""
+        """Wait for the contact's reply to request self.message_id, created at `created`.
+        `since` is WhatsApp's timestamp for the sent message; after a restart only the local
+        creation time is known, so allow a few seconds of clock skew."""
         await self.set_status('waiting')
         w = self.config['whatsapp']
         try:
-            raw = await self.blocking(self.messenger.wait_reply, since or created - 5,
+            raw = await self.blocking(self.messenger.wait_reply, self.message_id, since or created - 5,
                                       created + w['reply_timeout_seconds'], self.stop)
         except TimeoutError as exc:
             self.store.update(self.message_id, 'expired')
@@ -248,9 +256,12 @@ class Session:
                 self.message_id = f'<{uuid.uuid4()}@pi-voice>'
                 self.store.create(self.message_id, self.transcript)
                 await self.set_status('waiting')
-                sent_at = await self.blocking(self.messenger.send, self.transcript)
+                sent = await self.blocking(self.messenger.send, self.transcript)
+                # Keep WhatsApp's ID: replies are matched to it, including after a restart.
+                self.store.rename(self.message_id, sent['id'])
+                self.message_id = sent['id']
                 self.store.update(self.message_id, 'sent')
-                await self.wait_and_speak(self.store.latest()['created'], sent_at)
+                await self.wait_and_speak(self.store.latest()['created'], sent['timestamp'])
                 await self.set_status('idle')
             except NoReply:
                 LOG.info('No reply to %s before the deadline', self.message_id)
@@ -282,9 +293,16 @@ class Session:
         return text
 
     async def telemetry(self):
+        """Pi health every 30 s; calendar events whenever they change (checked every 5 s)."""
+        sent_version, tick = 0, 0
         while True:
-            await self.event(type='system', **system_stats())
-            await asyncio.sleep(30)
+            if tick % 6 == 0:
+                await self.event(type='system', **system_stats())
+            if self.calendar and self.calendar.events is not None and self.calendar.version != sent_version:
+                sent_version = self.calendar.version
+                await self.event(type='calendar', events=self.calendar.events)
+            tick += 1
+            await asyncio.sleep(5)
 
     async def run(self):
         receiver = asyncio.create_task(self.receive())
@@ -309,6 +327,16 @@ async def serve(config, engines):
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     store = Store(state / 'requests.sqlite3')
     active = False
+    calendar = refresher = None  # keep a reference so the task isn't garbage-collected
+    if config['calendar']['ical_urls']:
+        calendar = agenda.Shared()
+
+        async def refresh():
+            urls, minutes = config['calendar']['ical_urls'], config['calendar']['refresh_minutes']
+            while True:
+                calendar.update(await asyncio.to_thread(agenda.load, urls))
+                await asyncio.sleep(minutes * 60)
+        refresher = asyncio.create_task(refresh())
 
     async def handler(ws):
         nonlocal active
@@ -321,7 +349,7 @@ async def serve(config, engines):
             return
         active = True
         try:
-            await Session(ws, config, engines, store).run()
+            await Session(ws, config, engines, store, calendar).run()
         except ConnectionClosed:
             pass
         except Exception:
@@ -342,6 +370,8 @@ async def serve(config, engines):
                         max_queue=8, compression=None, ping_interval=20, ping_timeout=20):
         LOG.info('Listening on %s:%s', c['host'], c['port'])
         await shutdown.wait()
+    if refresher:
+        refresher.cancel()
     store.db.close()
 
 
