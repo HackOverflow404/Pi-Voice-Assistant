@@ -10,10 +10,13 @@ import signal
 import ssl
 import threading
 import time
+import uuid
+import wave
 
 from .audio import FRAME_SECONDS, Capture, Framer, normalize, rms, speech_threshold
-from .mail import Mail
+from .speech import chunks, speakable
 from .store import Store
+from .whatsapp import WhatsApp
 
 LOG = logging.getLogger('voice')
 
@@ -25,8 +28,6 @@ def load_config(path):
     token = c['server']['token']
     if not isinstance(token, str) or len(token) < 32 or token.startswith('REPLACE'):
         raise ValueError('Set server.token to a random secret of at least 32 characters')
-    if c['mail']['app_password'].startswith('REPLACE'):
-        raise ValueError('Set mail.app_password')
     for key, value in c['models'].items():
         target = (path.parent / value).resolve()
         if not target.exists():
@@ -37,9 +38,10 @@ def load_config(path):
             0 < a['silence_seconds'] < a['max_utterance_seconds'] <= 60 and
             0 < a['start_timeout_seconds'] <= a['max_utterance_seconds']):
         raise ValueError('Invalid audio thresholds or durations')
-    if not (1 <= c['mail']['reply_timeout_seconds'] <= 3600 and
-            1 <= c['mail']['max_reply_chars'] <= 10000):
-        raise ValueError('Invalid mail timeout or reply length')
+    w = c['whatsapp']
+    if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
+            1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
+        raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
     c['state_dir'] = str((path.parent / c['state_dir']).resolve())
     for key in ('tls_cert', 'tls_key'):
         if c['server'].get(key):
@@ -50,7 +52,7 @@ def load_config(path):
 
 
 class NoReply(Exception):
-    """No matching email reply arrived before the request deadline."""
+    """No reply arrived before the request deadline."""
 
 
 def system_stats():
@@ -73,7 +75,7 @@ def system_stats():
 class Session:
     def __init__(self, ws, config, engines, store):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
-        self.mail = Mail(config['mail'])
+        self.messenger = WhatsApp(config['whatsapp'])
         self.queue = asyncio.Queue(maxsize=25)  # 2 seconds maximum backlog
         self.stop = threading.Event()
         self.played = asyncio.Event()
@@ -136,36 +138,51 @@ class Session:
                     return
 
     async def speak(self, text):
+        """Synthesize and stream one sentence at a time: the client queues the WAV segments
+        and starts playing the first while later ones are still being synthesized, then
+        acknowledges once after the segment marked last."""
         await self.set_status('speaking')
-        wav, duration = await self.blocking(self.engines.synthesize, text)
-        if len(wav) > 32 * 1024 * 1024:
-            raise ValueError('Synthesized audio exceeds 32 MiB limit')
         self.playback_id = self.message_id
         self.playback_error = False
         self.played.clear()
-        await self.event(type='audio_start', id=self.playback_id, format='wav',
-                         bytes=len(wav), duration_seconds=duration)
-        for offset in range(0, len(wav), 32768):
-            await self.ws.send(wav[offset:offset + 32768])
-        await self.event(type='audio_end', id=self.playback_id)
-        await asyncio.wait_for(self.played.wait(), timeout=duration + 30)
+        parts = chunks(text) or ['I got an empty reply.']
+        started, total = time.monotonic(), 0.0
+        for seq, part in enumerate(parts):
+            wav, duration = await self.blocking(self.engines.synthesize, part)
+            if len(wav) > 32 * 1024 * 1024:
+                raise ValueError('Synthesized audio exceeds 32 MiB limit')
+            if seq == 0:
+                LOG.info('First of %d speech segments ready after %.1f s', len(parts), time.monotonic() - started)
+            total += duration
+            last = seq == len(parts) - 1
+            await self.event(type='audio_start', id=self.playback_id, seq=seq, last=last, format='wav',
+                             bytes=len(wav), duration_seconds=duration)
+            for offset in range(0, len(wav), 32768):
+                await self.ws.send(wav[offset:offset + 32768])
+            await self.event(type='audio_end', id=self.playback_id, seq=seq, last=last)
+        await asyncio.wait_for(self.played.wait(), timeout=total + 30)
         if self.playback_error:
             raise RuntimeError('Client could not play the reply')
         self.playback_id = None
         self.store.update(self.message_id, 'done')
 
     def no_reply_message(self):
-        seconds = self.config['mail']['reply_timeout_seconds']
-        return f'No email reply within {seconds // 60} min' if seconds >= 60 else f'No email reply within {seconds} s'
+        seconds = self.config['whatsapp']['reply_timeout_seconds']
+        return f'No reply within {seconds // 60} min' if seconds >= 60 else f'No reply within {seconds} s'
 
-    async def wait_and_speak(self, created):
+    async def wait_and_speak(self, created, since=None):
+        """Wait for the contact's reply to the request created at `created`. `since` is
+        WhatsApp's timestamp for the sent message; after a restart only the local creation
+        time is known, so allow a few seconds of clock skew."""
         await self.set_status('waiting')
+        w = self.config['whatsapp']
         try:
-            self.reply = await self.blocking(self.mail.wait_reply, self.message_id,
-                                            created + self.config['mail']['reply_timeout_seconds'], self.stop)
+            raw = await self.blocking(self.messenger.wait_reply, since or created - 5,
+                                      created + w['reply_timeout_seconds'], self.stop)
         except TimeoutError as exc:
             self.store.update(self.message_id, 'expired')
             raise NoReply from exc
+        self.reply = speakable(raw)[:w['max_reply_chars']]
         self.store.update(self.message_id, 'replied', self.reply)
         await self.speak(self.reply)
 
@@ -175,12 +192,12 @@ class Session:
             return
         self.message_id = latest['message_id']
         self.transcript, self.reply = latest['transcript'], latest['reply']
-        expired = time.time() >= latest['created'] + self.config['mail']['reply_timeout_seconds']
+        expired = time.time() >= latest['created'] + self.config['whatsapp']['reply_timeout_seconds']
         if latest['status'] in ('sending', 'sent') and expired:
             # Past its deadline (e.g. the client was away): close it out instead of retrying.
             self.store.update(self.message_id, 'expired')
         elif latest['status'] in ('sending', 'sent'):
-            # A crash between SMTP acceptance and commit is ambiguous. Watch the saved ID;
+            # A crash between sending and commit is ambiguous. Keep watching for the reply;
             # never resend automatically, which could cause duplicate external actions.
             await self.wait_and_speak(latest['created'])
         elif latest['status'] == 'replied':
@@ -228,23 +245,37 @@ class Session:
                     await self.set_status('idle', 'No speech recognized; say the wake phrase again')
                     continue
                 self.reply = ''
-                self.message_id = self.mail.new_id()
+                self.message_id = f'<{uuid.uuid4()}@pi-voice>'
                 self.store.create(self.message_id, self.transcript)
                 await self.set_status('waiting')
-                await self.blocking(self.mail.send, self.transcript, self.message_id)
+                sent_at = await self.blocking(self.messenger.send, self.transcript)
                 self.store.update(self.message_id, 'sent')
-                await self.wait_and_speak(self.store.latest()['created'])
+                await self.wait_and_speak(self.store.latest()['created'], sent_at)
                 await self.set_status('idle')
             except NoReply:
                 LOG.info('No reply to %s before the deadline', self.message_id)
                 await self.set_status('idle', self.no_reply_message())
             except Exception as exc:
                 LOG.warning('Request failed: %s', type(exc).__name__)
-                await self.set_status('idle', f'{type(exc).__name__}: request failed; check mail/network')
+                await self.set_status('idle', f'{type(exc).__name__}: request failed; check WhatsApp/network')
             finally:
                 self.flush()
 
+    def save_utterance(self, pcm):
+        """Opt-in (audio.debug_save_utterances) copy of the last five raw recordings in
+        state/utterances, for tuning speech recognition on real microphone audio."""
+        folder = Path(self.config['state_dir']) / 'utterances'
+        folder.mkdir(mode=0o700, exist_ok=True)
+        name = time.strftime('%Y%m%d-%H%M%S') + f'-{int(time.time() * 1000) % 1000:03d}.wav'
+        with wave.open(str(folder / name), 'wb') as out:
+            out.setnchannels(1); out.setsampwidth(2); out.setframerate(16000)
+            out.writeframes(pcm)
+        for old in sorted(folder.glob('*.wav'))[:-5]:
+            old.unlink()
+
     def transcribe(self, pcm):
+        if self.config['audio'].get('debug_save_utterances'):
+            self.save_utterance(pcm)
         pcm, gain = normalize(pcm)
         text = self.engines.transcribe(pcm)
         LOG.info('Transcribed %.1f s at gain %.1fx: %d words', len(pcm) / 32000, gain, len(text.split()))

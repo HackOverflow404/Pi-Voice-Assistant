@@ -32,10 +32,17 @@ fi
 PYTHONPATH="$live/server" "$live/.venv/bin/python" -m voice_assistant.app --config "$live/config.yaml" --check
 [[ ! -f "$unit" ]] || cp -a "$unit" "$unit.$(date +%Y%m%d-%H%M%S).bak"
 install -m 644 "$source_dir/systemd/pi-voice-assistant.service" "$unit"
-for name in echo-autostart.service echo-autostart.timer; do
+for name in echo-autostart.service echo-autostart.timer wa-bridge.service; do
   install -m 644 "$source_dir/systemd/$name" "$(dirname "$unit")/$name"
 done
+# The bridge binary is built off-Pi (./deploy-bridge.sh copies it to dist/ or straight to bin/).
+[[ ! -f "$source_dir/dist/wa-bridge" ]] || install -D -m 755 "$source_dir/dist/wa-bridge" "$live/bin/wa-bridge"
 systemctl --user daemon-reload
 run_privileged loginctl enable-linger "$(id -un)"
+if [[ -x "$live/bin/wa-bridge" ]]; then
+  systemctl --user enable --now wa-bridge.service
+else
+  echo 'No WhatsApp bridge installed yet: run ./deploy-bridge.sh on the development machine.'
+fi
 systemctl --user enable --now pi-voice-assistant.service echo-autostart.timer
 systemctl --user --no-pager status pi-voice-assistant.service

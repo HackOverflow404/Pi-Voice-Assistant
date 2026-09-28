@@ -1,4 +1,4 @@
-"""Download official small STT / low TTS models; never overwrite a custom wake model."""
+"""Download official small STT / medium TTS models; never overwrite a custom wake model."""
 from pathlib import Path
 import urllib.request
 import zipfile
@@ -38,8 +38,8 @@ def main():
         (staging / name).rename(MODELS / name)
         staging.rmdir()
         archive.unlink()
-    base = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/low/'
-    for name in ('en_US-amy-low.onnx', 'en_US-amy-low.onnx.json', 'MODEL_CARD'):
+    base = 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/'
+    for name in ('en_US-lessac-medium.onnx', 'en_US-lessac-medium.onnx.json', 'MODEL_CARD'):
         download(base + name, MODELS / name)
     # Includes the shared melspectrogram / embedding ONNX feature models required
     # by a custom classifier. These live inside this runtime's openwakeword package.

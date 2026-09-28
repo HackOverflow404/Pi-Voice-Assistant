@@ -22,6 +22,9 @@ import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+/** One synthesized sentence of a reply; the server marks the reply's final segment. */
+private class Segment(val file: File, val id: String, val last: Boolean)
+
 private sealed interface Incoming {
     data object Open : Incoming
     data class Text(val value: String) : Incoming
@@ -112,11 +115,35 @@ class VoiceService : Service() {
             .header("Authorization", "Bearer ${settings.token}").build(), listener)
         socket = ws
         var mic: Job? = null
-        val file = File(cacheDir, "reply.wav")
+        var file: File? = null
         var output: FileOutputStream? = null
         var audioId: String? = null
+        var last = true
         var expected = 0L
         var received = 0L
+        // Replies arrive one sentence at a time; play each as soon as it is complete while
+        // the next downloads, and acknowledge once after the last segment.
+        val segments = Channel<Segment>(Channel.UNLIMITED)
+        val player = launch {
+            var failedId: String? = null
+            for (segment in segments) {
+                try {
+                    if (failedId != segment.id) play(segment.file)
+                } catch (cancel: CancellationException) {
+                    throw cancel
+                } catch (_: Exception) {
+                    failedId = segment.id
+                    State.connection("Connected", "Could not play reply audio")
+                } finally {
+                    segment.file.delete()
+                }
+                if (segment.last) {
+                    val result = if (failedId == segment.id) "playback_error" else "playback_done"
+                    check(ws.send(JSONObject().put("type", result).put("id", segment.id).toString()))
+                    failedId = null
+                }
+            }
+        }
         try {
             for (event in incoming) {
                 when (event) {
@@ -135,9 +162,11 @@ class VoiceService : Service() {
                             "audio_start" -> {
                                 check(output == null) { "Overlapping audio transfer" }
                                 audioId = json.getString("id")
+                                last = json.optBoolean("last", true)
                                 expected = json.getLong("bytes")
                                 check(expected in 44..(32L * 1024 * 1024)) { "Invalid WAV size" }
                                 received = 0
+                                file = File(cacheDir, "reply-${json.optInt("seq", 0)}.wav")
                                 output = FileOutputStream(file)
                             }
                             "audio_end" -> {
@@ -145,15 +174,8 @@ class VoiceService : Service() {
                                     "Incomplete WAV transfer"
                                 }
                                 output?.close(); output = null
-                                var result = "playback_done"
-                                try { play(file) }
-                                catch (cancel: CancellationException) { throw cancel }
-                                catch (_: Exception) {
-                                    result = "playback_error"
-                                    State.connection("Connected", "Could not play reply audio")
-                                }
-                                check(ws.send(JSONObject().put("type", result).put("id", audioId).toString()))
-                                file.delete()
+                                segments.send(Segment(file!!, audioId!!, last))
+                                file = null
                                 audioId = null
                             }
                         }
@@ -167,9 +189,11 @@ class VoiceService : Service() {
             }
         } finally {
             muted = true
-            withContext(NonCancellable) { mic?.cancelAndJoin() }
+            withContext(NonCancellable) { mic?.cancelAndJoin(); player.cancelAndJoin() }
+            segments.close()
             output?.close()
-            file.delete()
+            file?.delete()
+            cacheDir.listFiles { f -> f.name.startsWith("reply-") }?.forEach { it.delete() }
             ws.cancel()
             incoming.cancel()
             socket = null

@@ -1,0 +1,20 @@
+[Unit]
+Description=WhatsApp bridge for the Pi voice assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/pi-voice-assistant
+ExecStart=%h/.local/share/pi-voice-assistant/bin/wa-bridge -db %h/.local/share/pi-voice-assistant/state/whatsapp.db -listen 127.0.0.1:8766
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/pi-voice-assistant/state
+MemoryMax=150M
+
+[Install]
+WantedBy=default.target

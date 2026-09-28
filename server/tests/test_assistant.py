@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import suppress
-from email.message import EmailMessage
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
@@ -9,25 +9,19 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 import wave
 
 from voice_assistant.audio import Capture, Framer, FRAME_BYTES, normalize, rms, speech_threshold
 from voice_assistant.app import Session, system_stats
-from voice_assistant.mail import Mail, plain_reply
+from voice_assistant.speech import chunks, speakable
 from voice_assistant.store import Store
+from voice_assistant.whatsapp import WhatsApp
 
 AUDIO = dict(speech_rms=450, silence_seconds=0.16, start_timeout_seconds=0.24,
              max_utterance_seconds=0.8, wake_threshold=0.5)
 SILENCE = bytes(FRAME_BYTES)
 SPEECH = struct.pack('<1280h', *([2000] * 1280))
-
-
-def reply_bytes(message_id='<request@test>', text='Here is your answer.'):
-    mail = EmailMessage()
-    mail['In-Reply-To'] = message_id
-    mail.set_content(text)
-    return mail.as_bytes()
 
 
 class AudioTests(unittest.TestCase):
@@ -91,50 +85,78 @@ class SystemStatsTests(unittest.TestCase):
         json.dumps(stats)
 
 
-class MailTests(unittest.TestCase):
-    def test_exact_id_not_substring_or_subject(self):
-        raw = reply_bytes('<prefix-request@test>')
-        self.assertIsNone(plain_reply(raw, '<request@test>', 100))
-        self.assertEqual(plain_reply(reply_bytes(), '<request@test>', 4), 'Here')
+class SpeechTests(unittest.TestCase):
+    def test_signoff_formatting_and_lists_become_sentences(self):
+        self.assertEqual(speakable('Nothing else is due tonight.\r\n\r\nInstinct'), 'Nothing else is due tonight.')
+        self.assertEqual(speakable('Due *tonight* at _11:59_ 🎉\n- Lab report\n- Pre-lab form\n\n-- \nSent by bot'),
+                         'Due tonight at 11:59. Lab report. Pre-lab form.')
+        self.assertEqual(speakable('See https://example.com/x for details.'), 'See a link for details.')
+        self.assertEqual(speakable('Only one paragraph'), 'Only one paragraph.')
 
-    def test_plain_alternative_decoding_and_skip_attachments(self):
-        message = EmailMessage()
-        message['In-Reply-To'] = '<other@test> <request@test>'
-        message.set_content('Café answer.')
-        message.add_alternative('<p>HTML answer</p>', subtype='html')
-        message.add_attachment(b'Unwanted attachment', maintype='text', subtype='plain', filename='note.txt')
-        self.assertEqual(plain_reply(message.as_bytes(), '<request@test>', 100), 'Café answer.')
+    def test_chunks_start_short_and_join_fragments(self):
+        text = ('The lab report, the pre-lab form, and the Gradescope report are all due at 11:59 pm. '
+                'Ok. Demo is tomorrow at 1:20 pm in Siebel. Nothing else is due tonight.')
+        self.assertEqual(chunks(text), ['The lab report, the pre-lab form,',
+                                        'and the Gradescope report are all due at 11:59 pm.',
+                                        'Ok. Demo is tomorrow at 1:20 pm in Siebel.', 'Nothing else is due tonight.'])
+        self.assertEqual(chunks(''), [])
 
-    def test_html_only_ignored(self):
-        message = EmailMessage()
-        message['In-Reply-To'] = '<request@test>'
-        message.set_content('<b>Not plain text</b>', subtype='html')
-        self.assertIsNone(plain_reply(message.as_bytes(), '<request@test>', 100))
 
-    def test_idle_then_reply_without_marking_read(self):
-        class FakeIMAP:
-            Error = OSError
-            def __init__(self, *args, **kwargs): self.searches = 0
-            def __enter__(self): return self
-            def __exit__(self, *args): pass
-            def login(self, *args): pass
-            def select_folder(self, folder, readonly): assert readonly
-            def capabilities(self): return [b'IDLE']
-            def search(self, criteria):
-                self.searches += 1
-                return [] if self.searches == 1 else [123]
-            def fetch(self, uids, parts):
-                if parts == ['RFC822.SIZE']: return {123: {b'RFC822.SIZE': 100}}
-                assert parts == ['BODY.PEEK[]']
-                return {123: {b'BODY[]': reply_bytes()}}
-            def idle(self): pass
-            def idle_check(self, timeout): return [(1, b'EXISTS')]
-            def idle_done(self): pass
-        config = dict(imap_host='test', imap_port=993, username='a@test', app_password='secret',
-                      mailbox='INBOX', max_reply_chars=100)
-        with patch('imapclient.IMAPClient', FakeIMAP):
-            result = Mail(config).wait_reply('<request@test>', time.time() + 1, threading.Event())
-        self.assertEqual(result, 'Here is your answer.')
+class FakeBridge(BaseHTTPRequestHandler):
+    """Minimal stand-in for the Go bridge's HTTP API."""
+    sent, replies, polls = [], [], 0
+
+    def log_message(self, *args): pass
+
+    def reply(self, body, code=200):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        FakeBridge.sent.append(body)
+        self.reply({'id': 'ABC', 'timestamp': 1000})
+
+    def do_GET(self):
+        q = parse_qs(urlparse(self.path).query)
+        FakeBridge.polls += 1
+        since, after = int(q['since'][0]), int(q['after'][0])
+        self.reply({'messages': [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after]})
+
+
+class WhatsAppTests(unittest.TestCase):
+    def setUp(self):
+        FakeBridge.sent, FakeBridge.replies, FakeBridge.polls = [], [], 0
+        self.server = ThreadingHTTPServer(('127.0.0.1', 0), FakeBridge)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.client = WhatsApp(dict(bridge_url=f'http://127.0.0.1:{self.server.server_port}/', contact='Instinct',
+                                    reply_settle_seconds=0.2))
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_send_names_contact_and_returns_timestamp(self):
+        self.assertEqual(self.client.send('What is due?'), 1000)
+        self.assertEqual(FakeBridge.sent, [{'contact': 'Instinct', 'text': 'What is due?'}])
+
+    def test_joins_multi_bubble_reply_and_ignores_older_messages(self):
+        FakeBridge.replies = [dict(seq=1, timestamp=990, text='Old answer'),
+                              dict(seq=2, timestamp=1001, text='Two things are due.'),
+                              dict(seq=3, timestamp=1002, text='Lab report and pre-lab.')]
+        reply = self.client.wait_reply(1000, time.time() + 5, threading.Event())
+        self.assertEqual(reply, 'Two things are due.\n\nLab report and pre-lab.')
+
+    def test_timeout_and_bridge_down(self):
+        with self.assertRaises(TimeoutError):
+            self.client.wait_reply(1000, time.time() + 1.5, threading.Event())
+        down = WhatsApp(dict(bridge_url='http://127.0.0.1:9', contact='Instinct', reply_settle_seconds=0))
+        with self.assertRaises(TimeoutError):
+            down.wait_reply(1000, time.time() + 1, threading.Event())
 
 
 class FakeSocket:
@@ -165,12 +187,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.temp.name) / 'state.db')
         self.socket = FakeSocket()
-        self.session = Session(self.socket, {'audio': AUDIO, 'mail': {'reply_timeout_seconds': 10}},
-                               FakeEngines(), self.store)
+        whatsapp = dict(bridge_url='http://127.0.0.1:9', contact='Instinct', reply_timeout_seconds=10,
+                        reply_settle_seconds=0, max_reply_chars=4000)
+        self.config = {'audio': dict(AUDIO), 'whatsapp': whatsapp, 'state_dir': self.temp.name}
+        self.session = Session(self.socket, self.config, FakeEngines(), self.store)
         self.sent = []
-        self.session.mail.new_id = lambda: '<saved@test>'
-        self.session.mail.send = lambda text, mid: self.sent.append((text, mid))
-        self.session.mail.wait_reply = lambda *args: 'It is sunny.'
+        self.session.messenger.send = lambda text: self.sent.append(text) or 1000
+        self.session.messenger.wait_reply = lambda *args: 'It is sunny.\r\n\r\nInstinct'
         self.task = None
 
     async def asyncTearDown(self):
@@ -204,14 +227,39 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         data = b''.join(e for e in events if isinstance(e, bytes))
         with wave.open(io.BytesIO(data), 'rb') as wav:
             self.assertEqual(wav.getnframes(), 1280)
-        self.assertEqual(self.sent, [('What is the weather?', '<saved@test>')])
+        self.assertEqual(self.sent, ['What is the weather?'])
         self.assertEqual(self.store.latest()['status'], 'replied')
+        self.assertEqual(self.store.latest()['reply'], 'It is sunny.')  # sign-off stripped
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': 'wrong'}))
         await asyncio.sleep(0.01)
         self.assertEqual(self.session.status, 'speaking')
-        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': '<saved@test>'}))
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': self.session.message_id}))
         await self.until('idle')
         self.assertEqual(self.store.latest()['status'], 'done')
+
+    async def test_reply_streams_one_segment_per_sentence(self):
+        self.session.messenger.wait_reply = lambda *args: 'The first sentence is long enough. The second one too.'
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await self.socket.incoming.put(SILENCE)
+        await self.until('listening')
+        await self.socket.incoming.put(SPEECH + SILENCE * 2)
+        first = [e for e in await self.until('audio_end') if isinstance(e, dict) and e.get('type') == 'audio_end']
+        second = [e for e in await self.until('audio_end') if isinstance(e, dict) and e.get('type') == 'audio_end']
+        self.assertEqual([(e['seq'], e['last']) for e in first + second], [(0, False), (1, True)])
+        self.assertEqual(self.session.status, 'speaking')  # waits for one ack after the last segment
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': self.session.message_id}))
+        await self.until('idle')
+        self.assertEqual(self.store.latest()['status'], 'done')
+
+    async def test_debug_recordings_are_opt_in_and_capped(self):
+        self.config['audio']['debug_save_utterances'] = True
+        for _ in range(7):
+            self.session.save_utterance(SPEECH)
+            await asyncio.sleep(0.002)
+        saved = list((Path(self.temp.name) / 'utterances').glob('*.wav'))
+        self.assertEqual(len(saved), 5)
+        self.config['audio']['debug_save_utterances'] = False
 
     async def test_uncertain_send_recovers_without_resending(self):
         self.store.create('<saved@test>', 'Existing request')
@@ -225,13 +273,13 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.store.update('<old@test>', 'sent')
         self.store.db.execute('UPDATE requests SET created = created - 3600')
         self.store.db.commit()
-        self.session.mail.wait_reply = lambda *args: self.fail('expired request was retried')
+        self.session.messenger.wait_reply = lambda *args: self.fail('expired request was retried')
         self.task = asyncio.create_task(self.session.run())
         events = await self.until('idle')
         self.assertIsNone(events[-1]['error'])
         self.assertEqual(self.store.latest()['status'], 'expired')
 
-    async def test_silent_capture_does_not_send_mail(self):
+    async def test_silent_capture_does_not_send(self):
         self.task = asyncio.create_task(self.session.run())
         await self.until('idle')
         await self.socket.incoming.put(SILENCE)
@@ -251,16 +299,16 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.session.receive()
         self.assertEqual(self.socket.closed, 1003)
 
-    async def test_disconnect_cancels_imap_worker(self):
+    async def test_disconnect_cancels_reply_worker(self):
         self.store.create('<saved@test>', 'Existing request')
         started = threading.Event()
         finished = threading.Event()
-        def waiting(message_id, deadline, stop):
+        def waiting(since, deadline, stop):
             started.set()
             stop.wait(5)
             finished.set()
             raise InterruptedError('Cancelled')
-        self.session.mail.wait_reply = waiting
+        self.session.messenger.wait_reply = waiting
         self.task = asyncio.create_task(self.session.run())
         await self.until('waiting')
         for _ in range(100):
@@ -275,10 +323,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_timeout_returns_idle_with_error(self):
         self.store.create('<saved@test>', 'Existing request')
         def timeout(*args): raise TimeoutError('No reply')
-        self.session.mail.wait_reply = timeout
+        self.session.messenger.wait_reply = timeout
         self.task = asyncio.create_task(self.session.run())
         events = await self.until('idle')
-        self.assertEqual(events[-1]['error'], 'No email reply within 10 s')
+        self.assertEqual(events[-1]['error'], 'No reply within 10 s')
         self.assertEqual(self.store.latest()['status'], 'expired')
         self.assertEqual(self.sent, [])
 

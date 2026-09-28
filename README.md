@@ -1,13 +1,13 @@
 # Pi Voice Assistant
 
-A Raspberry Pi runs wake-word detection, speech recognition, email, and speech
-synthesis. An Echo Show 5 running LineageOS supplies the microphone, speaker,
-and Jetpack Compose dashboard. No cloud speech service is used.
+A Raspberry Pi runs wake-word detection, speech recognition, WhatsApp messaging,
+and speech synthesis. An Echo Show 5 running LineageOS supplies the microphone,
+speaker, and Jetpack Compose dashboard. No cloud speech service is used.
 
 ```
 Echo mic → authenticated WebSocket → openWakeWord → utterance capture → Vosk
-    → Gmail SMTP → medhanshgarg@mail.instinct.com
-    ← matching email reply via IMAP IDLE ← Piper WAV ← Echo speaker
+    → WhatsApp text to the "Instinct" chat (wa-bridge, linked to your account)
+    ← Instinct's WhatsApp reply ← Piper, one sentence at a time ← Echo speaker
 ```
 
 The server emits `idle`, `listening`, `transcribing`, `waiting`, and `speaking`
@@ -18,7 +18,8 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 
 ## Files
 
-- `server/voice_assistant/`: Python server, audio framing, speech engines, mail, SQLite outbox.
+- `server/voice_assistant/`: Python server, audio framing, speech engines, WhatsApp client, SQLite outbox.
+- `bridge/`: Go WhatsApp bridge (whatsmeow) the server talks to over localhost HTTP.
 - `android/`: Kotlin app, minimum API 26, target API 33, compiled against API 35.
 - `config.example.yaml`: configuration template; `config.yaml` is private and ignored by Git.
 - `models/`: custom wake classifier plus downloaded Vosk / Piper models.
@@ -27,6 +28,8 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 - `build-apk.sh`: checked Gradle distribution download, APK build, Android lint (refuses to run on the Pi).
 - `scripts/echo-autostart.sh`, `systemd/echo-autostart.*`: Pi timer that restarts the Echo app over adb.
 - `deploy-apk.sh`: build on the dev machine, copy to the Pi, install on the Echo via the Pi's adb.
+- `build-bridge.sh`, `deploy-bridge.sh`, `systemd/wa-bridge.service`: cross-compile the bridge on the
+  dev machine and install it on the Pi as a user service.
 
 ## Pi setup (ARM64 Debian / Raspberry Pi OS)
 
@@ -64,11 +67,11 @@ cp /path/to/your/trained-wake-word.onnx models/custom.onnx
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-Edit `config.yaml`, setting `server.token` to that random value, and the Gmail
-username and app password. The default destination is already
-`medhanshgarg@mail.instinct.com`. Relative model, state, and TLS paths resolve
-against the config file's directory. Keep the app password only on the Pi;
-the Android app receives only the shared WebSocket token.
+Edit `config.yaml`, setting `server.token` to that random value, and
+`whatsapp.contact` to the chat to text (default `Instinct`). Relative model, state,
+and TLS paths resolve against the config file's directory. The Android app receives
+only the shared WebSocket token. Then install the WhatsApp bridge and pair it; see
+[WhatsApp](#whatsapp).
 
 The custom `.onnx` must be an **openWakeWord-compatible classifier**, exported
 against the matching feature embeddings. Setup downloads the shared feature
@@ -76,14 +79,14 @@ models but cannot supply your trained custom phrase. See the
 [openWakeWord project](https://github.com/dscripka/openWakeWord) for training/export.
 
 Setup downloads [Vosk small English 0.15](https://alphacephei.com/vosk/models)
-and [Piper en_US-amy-low](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/amy/low).
+and [Piper en_US-lessac-medium](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/lessac/medium).
 It installs openWakeWord's ONNX dependencies explicitly to avoid the upstream
 unconditional TFLite wheel requirement. Python 3.11 is kept inside the project,
 so Debian's system Python is untouched. Review model licenses and the Piper
 GPL license before redistributing a bundled runtime.
 
 ```sh
-# Load and validate all models without connecting to Gmail:
+# Load and validate all models without contacting WhatsApp:
 PYTHONPATH=server .venv/bin/python -m voice_assistant.app --config config.yaml --check
 
 # Optional foreground run before installing:
@@ -106,36 +109,45 @@ systemctl --user status pi-voice-assistant
 journalctl --user -u pi-voice-assistant -f
 ```
 
-The service reconnects to IMAP within the original reply deadline. A temporary
-startup network failure is handled by the client/mail reconnect loops. No Pi
+A reply wait survives bridge and WhatsApp reconnects within the original deadline.
+A temporary startup network failure is handled by the reconnect loops. No Pi
 microphone or audio device is needed. If CPU inference cannot keep pace with
 16 kHz input, the server closes the connection instead of accumulating stale audio.
 
-## Gmail app password
+## WhatsApp
 
-1. Use a Gmail account that can send to the destination and receive its replies.
-2. Enable [2-Step Verification](https://support.google.com/accounts/answer/185839).
-3. Open [Google App passwords](https://myaccount.google.com/apppasswords), create
-   a password named “Pi Voice Assistant,” and put its 16-character value into
-   `mail.app_password`. Spaces in the displayed password are stripped by the server.
-4. Set `mail.username` to the full Gmail address. Keep the default SMTP SSL
-   endpoint `smtp.gmail.com:465` and IMAP SSL endpoint `imap.gmail.com:993`.
-5. Ensure IMAP is permitted for the account. Workspace administrators can
-   restrict IMAP/app passwords. If App passwords is unavailable, consult
-   [Google's eligibility guidance](https://support.google.com/accounts/answer/185833);
-   a normal account password will not work here.
+The Pi texts `whatsapp.contact` from **your own WhatsApp account**, as a linked
+device (like WhatsApp Web), and speaks that chat's reply. `bridge/` is a small Go
+service built on [whatsmeow](https://github.com/tulir/whatsmeow). It listens only
+on `127.0.0.1:8766` and keeps its session keys in `state/whatsapp.db`; treat that
+file like a password. Automating a personal account is outside WhatsApp's terms
+of service. At one message per spoken request the risk is low, but WhatsApp could
+still restrict the account.
 
-Reply from the recipient using the email client's **Reply** action. The reply
-must contain the original exact `Message-ID` in `In-Reply-To` and a `text/plain`
-MIME body. Subject matching and `References` alone do not count. HTML-only replies
-are ignored. Multipart plain-text alternatives are supported; attachments are
-excluded. The plain text, including any quoted history/signature, is spoken up
-to `max_reply_chars`. Set the reply sender to avoid unnecessary quoted history.
+Build on the development machine (Go comes from mise if it isn't installed) and
+install on the Pi:
 
-The default watched mailbox is `INBOX`; replies routed to Spam or archived by
-filters will not be seen there. Set `mail.mailbox` to the correct IMAP folder if
-needed (Gmail special folder names may be localized). The recipient must actually
-produce a reply; sending email does not itself create an assistant response.
+```sh
+./deploy-bridge.sh
+```
+
+Pair once, with your phone number (country code, digits only). The command prints an
+8-character code. On your phone, open **WhatsApp → Settings → Linked devices → Link
+a device → Link with phone number instead** and enter it:
+
+```sh
+ssh tps-l2 'curl -sS -X POST 127.0.0.1:8766/pair -d "{\"phone\": \"15551234567\"}"'
+ssh tps-l2 'curl -sS 127.0.0.1:8766/status'            # {"paired":true,"connected":true,...}
+ssh tps-l2 'curl -sS "127.0.0.1:8766/contacts?q=instinct"'
+```
+
+`whatsapp.contact` matches a contact, push or business name (exactly, then as a
+substring) or takes a phone number with country code. The reply is the contact's
+first message after yours; further messages that each follow within
+`reply_settle_seconds` are joined to it. The reply is cleaned for speech (sign-off,
+formatting marks, emoji and links removed) and spoken one sentence at a time, so
+playback starts after the first sentence is synthesized. Unlinking the device on the
+phone logs the bridge out; pair again to restore it.
 
 ## Build the APK
 
@@ -273,59 +285,65 @@ adb uninstall com.instinct.voice
   Maximum incoming message size is 32 KiB.
 - Server → client JSON: `{"type":"status","status":"listening",
   "last_transcript":"...","last_reply":"...","message_id":null,"error":null}`.
-- WAV transfer: `audio_start` JSON with `id`, `format:"wav"`, `bytes`, and
-  `duration_seconds`; binary chunks of at most 32 KiB; then `audio_end` with
-  the same `id`. The WAV carries Piper's actual sample rate.
-- Android writes the streamed WAV to a bounded temporary cache file and plays
-  it once the transfer completes. This is chunked transfer, not progressive
-  speech generation. No base64 conversion or sample-rate assumptions are used.
-- After playback Android sends `{"type":"playback_done","id":"<message-id>"}`
+- WAV transfer, one segment per sentence: `audio_start` JSON with `id`, `seq`,
+  `last`, `format:"wav"`, `bytes`, and `duration_seconds`; binary chunks of at most
+  32 KiB; then `audio_end` with the same `id`, `seq` and `last`. Each WAV carries
+  Piper's actual sample rate.
+- Android writes each segment to a temporary cache file and queues it; segments
+  play back to back while later ones are still being synthesized and downloaded.
+- After the segment marked `last`, Android sends `{"type":"playback_done","id":"<message-id>"}`
   (or `playback_error`). The server remains speaking until a matching acknowledgement
   or timeout. Mic packets continue, containing zeros while transcribing/waiting/
   speaking; the server also discards them. Wake detection cannot trigger on TTS.
 - Connection failures retry with 1–30 second backoff. Queues and utterance size
   are bounded. Mic streams that stop for 15 seconds are disconnected.
-- `state/requests.sqlite3` records Message-ID, transcript, reply, creation time,
+- `state/requests.sqlite3` records a request ID, transcript, reply, creation time,
   and delivery/playback state. A reconnect resumes the latest pending reply watch
-  or replays an unacknowledged reply. A process crash during SMTP is ambiguous;
-  it watches the stored ID but **never automatically resends**. Requests are not
+  or replays an unacknowledged reply; a request past `reply_timeout_seconds` is
+  marked expired instead. A process crash while sending is ambiguous; it keeps
+  watching for the reply but **never automatically resends**. Requests are not
   deduplicated across distinct new spoken commands. State is retained indefinitely;
   stop the service before deleting the database to clear history.
-- Raw microphone audio is held in bounded memory and not saved. Transcripts and
-  replies are retained in SQLite and Gmail. The shared token is stored in the
+- Raw microphone audio is held in bounded memory and not saved, unless
+  `audio.debug_save_utterances` is on: then the last five recordings are kept in
+  `state/utterances/` for tuning speech recognition. Transcripts and replies are
+  retained in SQLite and in the WhatsApp chat. The shared token is stored in the
   Android app's private preferences, with Android backup disabled.
 
 Plain `ws://` sends the token and audio unencrypted; use it only on a trusted
 private LAN. For other networks configure `server.tls_cert` and `server.tls_key`
 and a `wss://` URL whose hostname matches a certificate trusted by Android.
 Certificate verification is never disabled. Do not expose the plain port to the
-internet. Gmail connections always use verified TLS.
+internet. The bridge's HTTP API has no authentication, so keep it on localhost.
 
 ## Tests and troubleshooting
 
-Lightweight server tests don't require speech models or Gmail credentials:
+Lightweight server tests don't require speech models or WhatsApp:
 
 ```sh
 python3 -m venv .test-venv
-.test-venv/bin/pip install PyYAML==6.0.2 websockets==15.0.1 IMAPClient==3.0.1
+.test-venv/bin/pip install PyYAML==6.0.2 websockets==15.0.1
 PYTHONPATH=server .test-venv/bin/python -m unittest discover -s server/tests -v
-bash -n setup.sh install uninstall build-apk.sh deploy-apk.sh scripts/echo-autostart.sh
+bash -n setup.sh install uninstall build-apk.sh deploy-apk.sh build-bridge.sh deploy-bridge.sh scripts/echo-autostart.sh
+(cd bridge && go vet ./...)
 ```
 
-Tests cover fragmented PCM, silence/max-duration endpointing, exact email
-matching, MIME alternatives, IMAP IDLE, saved IDs, recovery without resending,
-WAV transfer, and acknowledgement gating with fake inference/mail. They do not
-send email. Actual wake accuracy, Pi inference latency, Gmail round trips,
+Tests cover fragmented PCM, silence/max-duration endpointing, wake-relative speech
+thresholds and gain, reply cleanup and sentence chunking, the WhatsApp client against
+a fake bridge (multi-message replies, timeouts, bridge down), saved IDs, recovery
+without resending, expiry, streamed WAV segments, and acknowledgement gating. They
+do not contact WhatsApp. Actual wake accuracy, Pi inference latency, WhatsApp round trips,
 Echo audio routing, and boot behavior require the target hardware and credentials.
 
 If Listening never appears, check the custom classifier and lower
 `audio.wake_threshold` cautiously. If recordings end too early or never end,
-adjust `audio.speech_rms` and `silence_seconds` for ambient noise. If Waiting
-times out, inspect the reply's `In-Reply-To` header and watched mailbox. Gmail
-authentication failures often mean a revoked app password or account policy.
+adjust `audio.speech_rms` and `silence_seconds` for ambient noise; the server logs
+the wake-phrase and utterance levels. If Waiting times out, check
+`curl 127.0.0.1:8766/status` on the Pi and `journalctl --user -u wa-bridge`.
 If connected but the microphone is silent after reboot, check device-owner status,
 microphone permission, the Android microphone privacy toggle, and ROM drivers.
 
-`./uninstall` stops the Pi service and removes its installed code/runtime and unit.
-It preserves installed config, models, history, and user lingering. Remove these
+`./uninstall` stops the Pi services and removes their installed code/runtime and units.
+It preserves installed config, models, history (including the WhatsApp session in
+`state/whatsapp.db`), and user lingering. Remove these
 manually if desired after reviewing their contents. The source project is untouched.
