@@ -22,6 +22,7 @@ data class Dashboard(
 data class PiStatus(
     val memAvailableMb: Int?, val memTotalMb: Int?, val swapUsedMb: Int?,
     val load1: Double?, val uptimeSeconds: Long?, val tempC: Double?,
+    val cpuPercent: Double?, val memPercent: Double?,
     val receivedAt: Long = System.currentTimeMillis()
 )
 
@@ -44,7 +45,8 @@ object State {
         fun int(key: String) = if (json.has(key)) json.optInt(key) else null
         fun double(key: String) = if (json.has(key)) json.optDouble(key) else null
         it.copy(pi = PiStatus(int("mem_available_mb"), int("mem_total_mb"), int("swap_used_mb"),
-            double("load1"), if (json.has("uptime_s")) json.optLong("uptime_s") else null, double("temp_c")))
+            double("load1"), if (json.has("uptime_s")) json.optLong("uptime_s") else null, double("temp_c"),
+            double("cpu_percent"), double("mem_percent")))
     }
     fun event(json: JSONObject) = mutable.update {
         it.copy(status = json.optString("status", "idle"),

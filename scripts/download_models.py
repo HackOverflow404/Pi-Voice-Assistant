@@ -1,7 +1,6 @@
-"""Download official small STT / medium TTS models; never overwrite a custom wake model."""
+"""Download Whisper tiny.en STT / Piper medium TTS models; never overwrite a custom wake model."""
 from pathlib import Path
 import urllib.request
-import zipfile
 import shutil
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,21 +22,11 @@ def download(url, target):
 
 def main():
     MODELS.mkdir(exist_ok=True)
-    name = 'vosk-model-small-en-us-0.15'
-    if not (MODELS / name).exists():
-        archive = MODELS / (name + '.zip')
-        download(f'https://alphacephei.com/vosk/models/{name}.zip', archive)
-        staging = MODELS / '.vosk-extract'
-        staging.mkdir(exist_ok=True)
-        with zipfile.ZipFile(archive) as source:
-            for member in source.infolist():
-                resolved = (staging / member.filename).resolve()
-                if not resolved.is_relative_to(staging.resolve()):
-                    raise ValueError('Unsafe model archive path')
-            source.extractall(staging)
-        (staging / name).rename(MODELS / name)
-        staging.rmdir()
-        archive.unlink()
+    whisper = MODELS / 'whisper-tiny.en'
+    if not (whisper / 'model.bin').exists():
+        print('Downloading Whisper tiny.en', flush=True)
+        from faster_whisper import download_model
+        download_model('tiny.en', output_dir=str(whisper))
     base = 'https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/'
     for name in ('en_US-lessac-medium.onnx', 'en_US-lessac-medium.onnx.json', 'MODEL_CARD'):
         download(base + name, MODELS / name)

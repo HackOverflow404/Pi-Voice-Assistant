@@ -1,5 +1,4 @@
 import io
-import json
 import wave
 
 
@@ -7,11 +6,14 @@ class Engines:
     def __init__(self, config):
         import numpy as np
         from openwakeword.model import Model as WakeModel
-        from vosk import Model as VoskModel
+        from faster_whisper import WhisperModel
         from piper import PiperVoice
         self.np = np
         self.wake = WakeModel(wakeword_models=[config['wake']], inference_framework='onnx')
-        self.vosk = VoskModel(config['vosk'])
+        # Whisper tiny.en transcribed the Echo's quiet, reverberant recordings correctly where
+        # Vosk small did not, without inventing text from silence (unlike base.en), and fits
+        # the Pi's memory.
+        self.whisper = WhisperModel(config['whisper'], device='cpu', compute_type='int8', cpu_threads=4)
         self.piper = PiperVoice.load(config['piper'])
 
     def predict(self, frame):
@@ -21,14 +23,10 @@ class Engines:
         self.wake.reset()
 
     def transcribe(self, pcm):
-        from vosk import KaldiRecognizer
-        recognizer = KaldiRecognizer(self.vosk, 16000)
-        parts = []
-        for offset in range(0, len(pcm), 8000):
-            if recognizer.AcceptWaveform(pcm[offset:offset + 8000]):
-                parts.append(json.loads(recognizer.Result()).get('text', ''))
-        parts.append(json.loads(recognizer.FinalResult()).get('text', ''))
-        return ' '.join(x for x in parts if x).strip()
+        audio = self.np.frombuffer(pcm, dtype='<i2').astype(self.np.float32) / 32768
+        segments, _ = self.whisper.transcribe(audio, language='en', beam_size=1, vad_filter=False,
+                                              condition_on_previous_text=False, without_timestamps=True)
+        return ' '.join(s.text.strip() for s in segments).strip()
 
     def synthesize(self, text):
         output = io.BytesIO()

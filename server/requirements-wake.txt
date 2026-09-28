@@ -2,5 +2,6 @@
 # Install openwakeword with --no-deps, and explicitly provide its ONNX dependencies.
 scipy==1.14.1
 scikit-learn==1.6.1
+# Also needed by faster-whisper 1.1.1, which imports it without declaring it.
 requests==2.32.4
 tqdm==4.67.1

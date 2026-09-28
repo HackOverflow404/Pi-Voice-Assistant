@@ -5,7 +5,7 @@ and speech synthesis. An Echo Show 5 running LineageOS supplies the microphone,
 speaker, and Jetpack Compose dashboard. No cloud speech service is used.
 
 ```
-Echo mic → authenticated WebSocket → openWakeWord → utterance capture → Vosk
+Echo mic → authenticated WebSocket → openWakeWord → utterance capture → Whisper
     → WhatsApp text to the "Instinct" chat (wa-bridge, linked to your account)
     ← Instinct's WhatsApp reply ← Piper, one sentence at a time ← Echo speaker
 ```
@@ -22,7 +22,7 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 - `bridge/`: Go WhatsApp bridge (whatsmeow) the server talks to over localhost HTTP.
 - `android/`: Kotlin app, minimum API 26, target API 33, compiled against API 35.
 - `config.example.yaml`: configuration template; `config.yaml` is private and ignored by Git.
-- `models/`: custom wake classifier plus downloaded Vosk / Piper models.
+- `models/`: custom wake classifier plus downloaded Whisper / Piper models.
 - `setup.sh`: Debian packages, isolated Python 3.11 runtime, dependencies, model downloads.
 - `install`, `uninstall`: install/remove separate live copies and a systemd user unit.
 - `build-apk.sh`: checked Gradle distribution download, APK build, Android lint (refuses to run on the Pi).
@@ -78,7 +78,8 @@ against the matching feature embeddings. Setup downloads the shared feature
 models but cannot supply your trained custom phrase. See the
 [openWakeWord project](https://github.com/dscripka/openWakeWord) for training/export.
 
-Setup downloads [Vosk small English 0.15](https://alphacephei.com/vosk/models)
+Setup downloads [Whisper tiny.en](https://huggingface.co/Systran/faster-whisper-tiny.en) (run with
+faster-whisper, int8 on the CPU)
 and [Piper en_US-lessac-medium](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/lessac/medium).
 It installs openWakeWord's ONNX dependencies explicitly to avoid the upstream
 unconditional TFLite wheel requirement. Python 3.11 is kept inside the project,
@@ -203,7 +204,7 @@ The app is an always-on, full-screen display: 24-hour clock and date; weather fr
 Echo's public IP (ipapi.co, falling back to geojs.io; cached for a day), with
 today's high/low and the next six hours; today's and tomorrow's events from calendars
 synced on the Echo (cancelled and declined events hidden); and a status bar with the
-voice state and Pi health (CPU temperature, free memory, load), which the server sends
+voice state and Pi health (hottest temperature sensor, CPU and RAM use), which the server sends
 every 30 seconds. While the assistant is listening, waiting or speaking, a conversation
 card replaces the calendar and stays for 20 seconds after the reply. The background
 follows sunrise and sunset. The app never dims the screen. A long press

@@ -160,7 +160,10 @@ class SystemStatsTests(unittest.TestCase):
         self.assertGreater(stats['mem_total_mb'], 0)
         self.assertLessEqual(stats['mem_available_mb'], stats['mem_total_mb'])
         self.assertGreaterEqual(stats['load1'], 0)
+        self.assertTrue(0 <= stats['mem_percent'] <= 100)
         json.dumps(stats)
+        time.sleep(0.05)
+        self.assertTrue(0 <= system_stats()['cpu_percent'] <= 100)  # needs two samples
 
 
 class SpeechTests(unittest.TestCase):

@@ -62,6 +62,31 @@ class NoReply(Exception):
     """No reply arrived before the request deadline."""
 
 
+_last_cpu = None  # (busy, total) jiffies at the previous system_stats() call
+
+
+def cpu_percent():
+    """CPU busy share since the previous call, from /proc/stat; None on the first call."""
+    global _last_cpu
+    fields = [int(x) for x in Path('/proc/stat').read_text().split('\n', 1)[0].split()[1:]]
+    idle = fields[3] + fields[4]  # idle + iowait
+    total = sum(fields[:8])       # excludes guest time, already counted in user/nice
+    previous, _last_cpu = _last_cpu, (total - idle, total)
+    if previous is None or total <= previous[1]:
+        return None
+    return round(100 * (total - idle - previous[0]) / (total - previous[1]), 1)
+
+
+def max_temperature():
+    """Hottest reading across all thermal zones and hwmon sensors, in degrees C."""
+    readings = []
+    for pattern in ('/sys/class/thermal/thermal_zone*/temp', '/sys/class/hwmon/hwmon*/temp*_input'):
+        for path in Path('/').glob(pattern.lstrip('/')):
+            with suppress(OSError, ValueError):
+                readings.append(int(path.read_text()) / 1000)
+    return round(max(readings), 1) if readings else None
+
+
 def system_stats():
     """Pi health for the dashboard; any unreadable source is omitted."""
     stats = {}
@@ -70,13 +95,15 @@ def system_stats():
         mb = lambda key: int(info[key].split()[0]) // 1024
         stats.update(mem_total_mb=mb('MemTotal'), mem_available_mb=mb('MemAvailable'),
                      swap_used_mb=mb('SwapTotal') - mb('SwapFree'))
+        stats['mem_percent'] = round(100 * (1 - mb('MemAvailable') / mb('MemTotal')), 1)
+    with suppress(OSError, ValueError, IndexError):
+        stats['cpu_percent'] = cpu_percent()
     with suppress(OSError, ValueError, IndexError):
         stats['load1'] = float(Path('/proc/loadavg').read_text().split()[0])
     with suppress(OSError, ValueError, IndexError):
         stats['uptime_s'] = int(float(Path('/proc/uptime').read_text().split()[0]))
-    with suppress(OSError, ValueError):
-        stats['temp_c'] = round(int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000, 1)
-    return stats
+    stats['temp_c'] = max_temperature()
+    return {k: v for k, v in stats.items() if v is not None}
 
 
 class Session:

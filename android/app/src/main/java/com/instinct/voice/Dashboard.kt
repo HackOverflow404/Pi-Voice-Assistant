@@ -329,8 +329,6 @@ private fun ConversationCard(state: Dashboard) {
         Spacer(Modifier.height(16.dp))
         if (state.transcript.isNotBlank()) Text("“${state.transcript}”", fontSize = 26.sp, fontWeight = FontWeight.Light,
             lineHeight = 32.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-        if (state.status == "waiting") Text("Sent by email, waiting for the reply", color = Faint, fontSize = 16.sp,
-            modifier = Modifier.padding(top = 8.dp))
         if (state.reply.isNotBlank() && state.status in listOf("speaking", "idle")) {
             Spacer(Modifier.weight(1f))
             Box(Modifier.fillMaxWidth().height(1.dp).background(GlassEdge))
@@ -394,15 +392,14 @@ private fun PiPill(pi: PiStatus?, connected: Boolean, now: LocalDateTime, modifi
             Text("Pi offline", color = Soft, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             return@Row
         }
-        val strained = (pi!!.memAvailableMb ?: Int.MAX_VALUE) < 300 || (pi.tempC ?: 0.0) >= 75
+        val strained = (pi!!.memPercent ?: 0.0) >= 85 || (pi.tempC ?: 0.0) >= 75
         Row(verticalAlignment = Alignment.CenterVertically) {
             Dot(if (strained) Amber else Accent, pulse = false)
             Spacer(Modifier.width(8.dp))
             Text("Pi", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
         pi.tempC?.let { Text("${it.roundToInt()}°C", color = Soft, fontSize = 16.sp) }
-        pi.memAvailableMb?.let { Text(if (it >= 1024) "%.1f GB free".format(it / 1024.0) else "$it MB free",
-            color = Soft, fontSize = 16.sp) }
-        pi.load1?.let { Text("load %.1f".format(it), color = Soft, fontSize = 16.sp) }
+        pi.cpuPercent?.let { Text("CPU ${it.roundToInt()}%", color = Soft, fontSize = 16.sp) }
+        pi.memPercent?.let { Text("RAM ${it.roundToInt()}%", color = Soft, fontSize = 16.sp) }
     }
 }
