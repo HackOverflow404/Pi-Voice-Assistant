@@ -210,8 +210,8 @@ seconds it checks over adb whether the Echo's voice service is running and, if t
 user last pressed Start (not Stop), launches the dashboard with the
 `com.instinct.voice.START` action. A visible activity may start the microphone service,
 and the dashboard then returns to the previous app. This covers Echo reboots and app
-updates. It cannot unlock a secure lock screen. Check it with
-`journalctl --user -u echo-autostart`.
+updates. It cannot unlock a secure lock screen. Check the last run with
+`systemctl --user status echo-autostart.service` (exit status 0 = OK).
 
 If provisioning is rejected, read the command's reason and the ROM's requirements.
 Do not factory-reset a device just to bypass the failure. Without device-owner
