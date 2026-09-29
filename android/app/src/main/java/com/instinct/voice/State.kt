@@ -73,4 +73,8 @@ class Settings(context: Context) {
     var enabled: Boolean
         get() = prefs.getBoolean("enabled", false)
         set(value) { prefs.edit().putBoolean("enabled", value).apply() }
+    /** Media volume the service holds, 0-1 of the stream's range; set by voice commands. */
+    var mediaVolume: Float
+        get() = prefs.getFloat("media_volume", 1f)
+        set(value) { prefs.edit().putFloat("media_volume", value.coerceIn(0f, 1f)).apply() }
 }

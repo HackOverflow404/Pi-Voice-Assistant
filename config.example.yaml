@@ -58,6 +58,19 @@ stt:
   # after the wake word) is sent to Deepgram. Whisper remains the fallback.
   engine: whisper
   deepgram_model: nova-3
+echo:
+  # adb serial of the Echo attached to the Pi by USB; null uses the only attached device.
+  adb_serial: null
+  # "Start pairing" keeps the Echo discoverable this long, then returns to the dashboard.
+  pairing_seconds: 120
+jev:
+  # Optional. TypeSafe's Jev routes what the grammar doesn't recognize: a request for
+  # Instinct, a device command, a cancellation, or an accidental trigger. The transcript
+  # is sent to TypeSafe. Empty: only the built-in phrases control the Echo.
+  api_key: ""
+  # Below this probability Jev's answer is not trusted and the request goes to Instinct.
+  min_probability: 0.6
+  timeout_seconds: 3
 calendar:
   # Private iCal addresses shown on the dashboard. Google Calendar: Settings -> your
   # calendar -> Integrate calendar -> "Secret address in iCal format". Anyone with the

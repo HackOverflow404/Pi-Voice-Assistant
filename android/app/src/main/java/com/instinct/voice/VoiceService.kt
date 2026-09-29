@@ -44,8 +44,9 @@ class VoiceService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // Media volume stays at maximum so Bluetooth sources (which scale their own audio) get
-    // the full speaker range; the assistant's speech is attenuated per player instead.
+    // Media volume is held at a set level (maximum unless changed by voice) so Bluetooth
+    // sources, which scale their own audio, get the full speaker range and can't drift it;
+    // the assistant's speech is attenuated per player instead.
     private val audio by lazy { getSystemService(AudioManager::class.java) }
     private val volumeWatcher = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -55,9 +56,27 @@ class VoiceService : Service() {
 
     private fun pinMediaVolume() {
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != max) {
-            audio.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+        val target = Math.round(Settings(this).mediaVolume * max)
+        if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != target) {
+            audio.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
         }
+    }
+
+    /** A spoken volume command from the Pi: move the held level up, down, or to a level,
+     *  in whole volume steps, and report the level actually applied. */
+    private fun changeMediaVolume(json: JSONObject): Float {
+        val settings = Settings(this)
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val step = maxOf(1, Math.round(json.optDouble("step", 0.1) * max).toInt())
+        val current = Math.round(settings.mediaVolume * max)
+        val index = when (json.optString("change")) {
+            "up" -> current + step
+            "down" -> current - step
+            else -> Math.round(json.optDouble("level", settings.mediaVolume.toDouble()) * max).toInt()
+        }.coerceIn(0, max)
+        settings.mediaVolume = index.toFloat() / max
+        pinMediaVolume()
+        return settings.mediaVolume
     }
 
     override fun onCreate() {
@@ -191,6 +210,11 @@ class VoiceService : Service() {
                                 muted = status !in listOf("idle", "listening")
                             }
                             "sent" -> Chimes.sent(chimeVolume)
+                            "media_volume" -> {
+                                val level = changeMediaVolume(json)
+                                check(ws.send(JSONObject().put("type", "media_volume_state")
+                                    .put("level", level.toDouble()).toString()))
+                            }
                             "system" -> State.system(json)
                             "calendar" -> State.calendar(json)
                             "audio_start" -> {

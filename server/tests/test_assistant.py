@@ -15,13 +15,15 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 import wave
 
-from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phrase, normalize, rms,
+from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phrase, is_noise_transcript,
+                                   normalize, rms,
                                    speech_threshold, wake_is_plausible)
 from voice_assistant import agenda
 from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
 from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
+from voice_assistant.controls import Levels
 from voice_assistant.store import Store
 from voice_assistant.whatsapp import WhatsApp
 
@@ -85,6 +87,21 @@ class ThresholdTests(unittest.TestCase):
         self.assertTrue(is_cancel_phrase('Never mind.'))
         self.assertTrue(is_cancel_phrase('Cancel'))
         self.assertFalse(is_cancel_phrase('Cancel my three pm meeting'))
+        for said in ('Actually, cancel.', 'Ignore the request.', 'Oh, never mind that.', 'I said stop!',
+                     'No, no, forget it.', 'Just ignore that, Clippy.', 'Scratch that.'):
+            self.assertTrue(is_cancel_phrase(said), said)
+        for said in ("What's the weather tomorrow? Actually, never mind.", 'Set a timer, cancel that.',
+                     'Remind me to call Mom. Wait, ignore the request.'):
+            self.assertTrue(is_cancel_phrase(said), said)
+        for said in ('Tell Sam to forget it.', 'How do I cancel my subscription?', 'Stop the music.',
+                     'Never mind the weather, what time is it?', 'No meetings tomorrow, right?'):
+            self.assertFalse(is_cancel_phrase(said), said)
+
+    def test_noise_transcripts(self):
+        for said in ('Thank you.', ' Thanks for watching!', '[Music]', '(upbeat music)', '♪', 'you', ''):
+            self.assertTrue(is_noise_transcript(said), said)
+        for said in ('Thank you, what time is it?', "What's the weather?", 'Okay, start pairing.'):
+            self.assertFalse(is_noise_transcript(said), said)
 
     def test_chime_at_start_is_not_speech(self):
         capture = Capture(dict(AUDIO, listen_grace_seconds=0.16))
@@ -426,6 +443,58 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': self.session.message_id}))
         await self.until('idle')
         self.assertEqual(self.store.latest()['status'], 'done')
+
+    async def say(self, transcript):
+        """Run the session through one wake word and utterance transcribed as `transcript`."""
+        self.session.engines.transcribe = lambda pcm: transcript
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await self.socket.incoming.put(SPEECH)
+        await self.until('listening')
+        await self.socket.incoming.put(SPEECH + SILENCE * 2)
+
+    async def test_voice_volume_command_is_handled_locally(self):
+        self.config['tts'] = {'speech_volume': 0.3}
+        self.session.levels = Levels(self.temp.name, 0.3)
+        await self.say('Hey Clippy, turn up your volume.')
+        events = await self.until('audio_end')
+        start = next(e for e in events if isinstance(e, dict) and e.get('type') == 'audio_start')
+        self.assertEqual(start['volume'], 0.4)  # the confirmation is spoken at the new level
+        self.assertEqual(self.session.reply, 'My voice is at 40 percent.')
+        self.assertEqual(Levels(self.temp.name, 0.3).speech_volume, 0.4)  # persisted
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': start['id']}))
+        await self.until('idle')
+        self.assertEqual(self.sent, [])  # never sent to Instinct
+        self.assertIsNone(self.store.latest())
+
+    async def test_system_volume_is_changed_by_the_echo_app(self):
+        await self.say('Volume down.')
+        events = await self.until('media_volume')
+        self.assertEqual((events[-1]['change'], events[-1]['step']), ('down', 0.1))
+        await self.socket.incoming.put(json.dumps({'type': 'media_volume_state', 'level': 0.9}))
+        start = next(e for e in await self.until('audio_start') if isinstance(e, dict) and e.get('type') == 'audio_start')
+        self.assertEqual(self.session.reply, 'Volume 90 percent.')
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': start['id']}))
+        await self.until('idle')
+        self.assertEqual(self.sent, [])
+
+    async def test_jev_can_discard_an_accidental_trigger(self):
+        class Router:
+            def decide(self, text): return 'accidental', 0.9
+        self.session.jev = Router()
+        await self.say('and then she told him the whole story')
+        await self.until('transcribing')
+        await self.until('idle')
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.sent, [])
+
+    async def test_jev_failure_still_reaches_instinct(self):
+        class Router:
+            def decide(self, text): raise RuntimeError('Jev 529: overloaded')
+        self.session.jev = Router()
+        await self.say('What is the weather?')
+        await self.until('audio_end')
+        self.assertEqual(self.sent, ['What is the weather?'])
 
     async def test_reply_streams_one_segment_per_sentence(self):
         self.session.messenger.wait_reply = lambda *args: 'The first sentence is long enough. The second one too.'

@@ -233,6 +233,33 @@ The wake-word model occasionally fires on near-silence or on TV and conversation
 - While waiting for the reply, tapping the card cancels the request and deletes the
   WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
 
+## Device commands
+
+After the wake word, a few phrases control the Echo itself instead of going to Instinct:
+
+- **Pairing:** "start pairing" / "pair a new device" opens the Echo's *Pair new device* screen,
+  which keeps it discoverable (under its Bluetooth name) for `echo.pairing_seconds`; "stop
+  pairing" returns to the dashboard. Accept the pairing prompt on the Echo's screen. The screen
+  isn't exported to other apps, so the Pi runs `adb root` first (LineageOS userdebug builds allow it).
+- **System volume:** "volume up/down", "turn it up", "louder", "set the volume to 50 percent",
+  "volume 7" (tenths), "max volume", "mute". The app holds media volume at this level instead of
+  always at maximum. The assistant's speech plays at a fraction of it, so muting mutes it too.
+- **Assistant voice volume:** "turn up your volume", "speak louder", "set your volume to 40 percent".
+  This replaces `tts.speech_volume` and is kept in `state/controls.json` across restarts.
+
+Each is confirmed aloud and never sent to WhatsApp. Only an utterance that is entirely one of
+these phrases counts, so "what's the volume of a sphere" still goes to Instinct.
+
+Before that, an utterance that is only a cancel ("never mind", "actually cancel", "ignore the
+request"), or a request ending in one ("what's the weather, actually never mind"), is discarded.
+So is a transcript that is just Whisper's text for non-speech ("Thank you.", "[Music]").
+
+With `jev.api_key` set, whatever the phrases above don't match goes to
+[Jev](https://docs.typesafe.ai/), TypeSafe's decision model. One request asks it both whether the
+utterance is for Instinct, a device command, a cancellation, or an accidental trigger, and, for a
+device command, which one. Answers below `jev.min_probability`, a device "set" without a spoken
+level, and any Jev error or timeout all fall back to sending the request to Instinct.
+
 ## Speech services and volume
 
 `stt.engine` and `tts.engine` choose local models (Whisper tiny.en, Piper) or Deepgram
@@ -242,8 +269,8 @@ voices of similar quality run 5-13x slower than real time on a Pi 4. Deepgram re
 only the recording made after the wake word, and the reply text. If a Deepgram request
 fails, that request or sentence falls back to the local model.
 
-While the voice service runs, the Echo keeps its media volume at maximum and restores it
-whenever something lowers it, so Bluetooth sources (which scale their own audio) get the
+While the voice service runs, the Echo holds its media volume at a set level (maximum unless
+changed by voice) and restores it whenever something else changes it, so Bluetooth sources (which scale their own audio) get the
 full speaker range from their own volume controls. The assistant's speech plays at
 `tts.speech_volume` of that (default 0.3), set on the Pi without rebuilding the app. The Echo also plays
 a rising chime when it starts listening and a short arpeggio once the request has been sent

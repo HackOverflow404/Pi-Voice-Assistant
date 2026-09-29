@@ -58,13 +58,47 @@ def wake_is_plausible(config, wake_levels, before_levels):
     return peak >= max(20.0, config.get('wake_min_ratio', 6.0) * noise)
 
 
-CANCEL_PHRASES = {'cancel', 'cancel that', 'never mind', 'nevermind', 'stop', 'forget it',
-                  'ignore that', 'nothing', 'no'}
+# A spoken cancel is one or more of these words, padded with any of the fillers:
+# "actually cancel", "ignore the request", "I said never mind", "no no, stop".
+CANCEL_WORDS = {'cancel', 'nevermind', 'stop', 'forget', 'ignore', 'disregard', 'scratch', 'abort',
+                'nothing', 'no', 'nope'}
+CANCEL_FILLERS = {'actually', 'wait', 'sorry', 'oh', 'um', 'uh', 'hmm', 'okay', 'ok', 'please', 'just',
+                  'hey', 'clippy', 'i', 'said', 'mean', 'that', 'it', 'this', 'about', 'the', 'my', 'last',
+                  'request', 'message', 'question', 'one'}
+# The same cancel said at the end of a request, as a correction: "what's the weather,
+# actually never mind". It must follow punctuation or a correction word, so a request that
+# merely ends in the words ("tell Sam to forget it") is still sent.
+TRAILING_CANCEL = re.compile(
+    r'(?:[,.?!;]|\b(?:actually|wait|sorry|no))[\s,]*(?:(?:actually|wait|sorry|oh|no|um|uh)[\s,]+)*'
+    r'(?:cancel(?: that| it| this| the request| my request)?|never ?mind(?: that)?|nvm|'
+    r'forget (?:it|that|about it)|ignore (?:that|this|it|the request|my request)|scratch that|'
+    r'disregard(?: that| it| this)?)[\s.!]*$')
 
 
 def is_cancel_phrase(text):
-    """The whole request was a spoken "cancel": discard it instead of sending."""
-    return re.sub(r'[^a-z ]', '', text.lower()).strip() in CANCEL_PHRASES
+    """The request was a spoken "cancel", alone or as a closing correction: discard it."""
+    lowered = re.sub(r'\b(?:never ?mind|nvm)\b', 'nevermind', text.lower())
+    words = re.sub(r'[^a-z ]', ' ', lowered).split()
+    rest = [w for w in words if w not in CANCEL_FILLERS]
+    if rest and all(w in CANCEL_WORDS for w in rest):
+        return True
+    return bool(TRAILING_CANCEL.search(text.lower().strip()))
+
+
+# What Whisper writes when it hears no speech (TV, a cough, the room), per its well-known
+# hallucinations on non-speech audio. A request that is only this is an accidental trigger.
+NOISE_TRANSCRIPTS = {'you', 'thank you', 'thanks', 'thank you very much', 'thanks for watching',
+                     'thank you for watching', 'thank you so much for watching', 'bye', 'bye bye',
+                     'oh', 'um', 'uh', 'hmm', 'mm', 'ah', 'huh', 'so', 'okay', 'the',
+                     'subtitles by the amaraorg community', 'please subscribe'}
+
+
+def is_noise_transcript(text):
+    """True when the transcript is non-speech: only bracketed sound tags like [Music] or
+    (upbeat music), or one of Whisper's stock phrases for silence."""
+    spoken = re.sub(r'\[[^\]]*\]|\([^)]*\)|[♪*]', ' ', text.lower())
+    words = re.sub(r'[^a-z ]', '', spoken).split()
+    return not words or ' '.join(words) in NOISE_TRANSCRIPTS
 
 
 class Capture:

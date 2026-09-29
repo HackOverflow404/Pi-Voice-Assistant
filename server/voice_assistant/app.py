@@ -14,9 +14,9 @@ import time
 import uuid
 import wave
 
-from . import agenda
-from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, normalize, rms, speech_threshold,
-                    wake_is_plausible)
+from . import agenda, controls
+from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_transcript, normalize, rms,
+                    speech_threshold, wake_is_plausible)
 from .speech import chunks, speakable
 from .store import Store
 from .whatsapp import WhatsApp
@@ -66,6 +66,19 @@ def load_config(path):
     stt.setdefault('deepgram_model', 'nova-3')
     if stt['engine'] not in ('whisper', 'deepgram') or (stt['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
         raise ValueError('stt.engine must be whisper or deepgram; deepgram needs tts.deepgram_api_key')
+    echo = c.setdefault('echo', {}) or {}
+    c['echo'] = echo
+    echo.setdefault('adb_serial', None)
+    echo.setdefault('pairing_seconds', 120)
+    if not 10 <= echo['pairing_seconds'] <= 600:
+        raise ValueError('echo.pairing_seconds must be between 10 and 600')
+    jev = c.setdefault('jev', {}) or {}
+    c['jev'] = jev
+    jev.setdefault('api_key', '')
+    jev.setdefault('min_probability', 0.6)
+    jev.setdefault('timeout_seconds', 3)
+    if not (0.34 <= jev['min_probability'] <= 1 and 0.5 <= jev['timeout_seconds'] <= 15):
+        raise ValueError('jev.min_probability must be 0.34-1 and jev.timeout_seconds 0.5-15')
     cal = c.setdefault('calendar', {}) or {}
     c['calendar'] = cal
     cal.setdefault('ical_urls', [])
@@ -154,8 +167,9 @@ def system_stats():
 
 
 class Session:
-    def __init__(self, ws, config, engines, store, calendar=None):
+    def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
+        self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         self.messenger = WhatsApp(config['whatsapp'])
         self.queue = asyncio.Queue(maxsize=25)  # 2 seconds maximum backlog
@@ -171,6 +185,8 @@ class Session:
         self.phrases = {}  # cached announcement audio
         self.cancel = asyncio.Event()  # the Echo's Cancel tap, before sending
         self.abort = threading.Event()  # the same tap while waiting for the reply
+        self.volume_reply = None  # the Echo's answer to a media volume change
+        self.pairing_timer = None
 
     async def event(self, **payload):
         await self.ws.send(json.dumps(payload))
@@ -220,6 +236,9 @@ class Session:
                     if event.get('type') == 'cancel' and self.status in ('confirming', 'waiting'):
                         self.cancel.set()
                         self.abort.set()
+                    if (event.get('type') == 'media_volume_state' and self.volume_reply and
+                            not self.volume_reply.done()):
+                        self.volume_reply.set_result(float(event['level']))
                     if (event.get('type') in ('playback_done', 'playback_error') and
                             self.playback_id and event.get('id') == self.playback_id):
                         self.playback_error = event.get('type') == 'playback_error'
@@ -228,12 +247,13 @@ class Session:
                     await self.ws.close(1003, 'Invalid JSON control message')
                     return
 
-    async def speak(self, text):
+    async def speak(self, text, audio_id=None):
         """Synthesize and stream one sentence at a time: the client queues the WAV segments
         and starts playing the first while later ones are still being synthesized, then
-        acknowledges once after the segment marked last."""
+        acknowledges once after the segment marked last. A reply to a request is recorded as
+        done; a device command's confirmation passes its own audio_id and isn't stored."""
         await self.set_status('speaking')
-        self.playback_id = self.message_id
+        self.playback_id = audio_id or self.message_id
         self.playback_error = False
         self.played.clear()
         parts = chunks(text) or ['I got an empty reply.']
@@ -249,7 +269,8 @@ class Session:
         if self.playback_error:
             raise RuntimeError('Client could not play the reply')
         self.playback_id = None
-        self.store.update(self.message_id, 'done')
+        if audio_id is None:
+            self.store.update(self.message_id, 'done')
 
     async def send_wav(self, audio_id, seq, last, wav, duration):
         if len(wav) > 32 * 1024 * 1024:
@@ -378,8 +399,24 @@ class Session:
                 if not self.transcript:
                     await self.set_status('idle', 'No speech recognized; say the wake phrase again')
                     continue
+                if is_noise_transcript(self.transcript):
+                    LOG.info('Ignored likely accidental trigger: transcript was non-speech')
+                    await self.set_status('idle')
+                    continue
                 if is_cancel_phrase(self.transcript):
+                    LOG.info('Request cancelled by voice')
                     await self.set_status('idle', 'Cancelled')
+                    continue
+                decision = await self.route(self.transcript)
+                if decision == 'cancel':
+                    await self.set_status('idle', 'Cancelled')
+                    continue
+                if decision == 'accidental':
+                    await self.set_status('idle')
+                    continue
+                if isinstance(decision, controls.Command):
+                    await self.control(decision)
+                    await self.set_status('idle', self.error)
                     continue
                 # A short window to discard a false trigger before anything is sent.
                 self.cancel.clear()
@@ -415,6 +452,85 @@ class Session:
                 await self.set_status('idle', f'{type(exc).__name__}: request failed; check WhatsApp/network')
             finally:
                 self.flush()
+
+    async def route(self, text):
+        """A device command from the grammar, else Jev's decision when it is configured,
+        else 'instinct'. A Jev failure never loses the request: it goes to Instinct."""
+        command = controls.parse(text)
+        if command or not self.jev:
+            return command or 'instinct'
+        started = time.monotonic()
+        try:
+            decision, probability = await asyncio.to_thread(self.jev.decide, text)
+        except Exception as exc:
+            LOG.warning('Jev failed (%s); sending to Instinct', exc)
+            return 'instinct'
+        LOG.info('Jev routed to %s (p=%.2f) in %.2f s', decision, probability, time.monotonic() - started)
+        return decision
+
+    async def control(self, command):
+        """Carry out a device command on the Echo and confirm it aloud."""
+        LOG.info('Device command %s', command)
+        self.reply, self.error = '', None
+        try:
+            if command.action == 'pairing_on':
+                name = await self.blocking(self.start_pairing)
+                seconds = self.config['echo']['pairing_seconds']
+                duration = f'{seconds // 60} minutes' if seconds % 60 == 0 and seconds > 60 else f'{seconds} seconds'
+                self.schedule_pairing_stop()
+                self.reply = f'Pairing mode is on. Connect to {name} within {duration}.'
+            elif command.action == 'pairing_off':
+                if self.pairing_timer:
+                    self.pairing_timer.cancel()
+                await self.blocking(self.echo.stop_pairing)
+                self.reply = 'Pairing mode is off.'
+            elif command.action.startswith('ai_'):
+                current = self.levels.speech_volume
+                level = {'ai_up': current + controls.STEP, 'ai_down': current - controls.STEP}.get(
+                    command.action, command.level)
+                self.set_speech_volume(controls.clamp(level, lowest=0.05))
+                self.reply = f'My voice is at {controls.percent(self.levels.speech_volume)}.'
+            else:
+                level = await self.media_volume(command.action.split('_')[1], command.level)
+                self.reply = 'The speaker is muted.' if level == 0 else f'Volume {controls.percent(level)}.'
+        except Exception as exc:
+            LOG.warning('Device command %s failed: %s', command.action, exc)
+            self.error = 'Could not control the Echo'
+            self.reply = 'Sorry, I could not change that on the Echo.'
+        await self.speak(self.reply, audio_id=f'control-{uuid.uuid4().hex[:8]}')
+
+    def start_pairing(self):
+        self.echo.start_pairing()
+        with suppress(Exception):
+            name = self.echo.adb('shell', 'settings', 'get', 'secure', 'bluetooth_name')
+            if name and name != 'null':
+                return name
+        return 'this speaker'
+
+    def schedule_pairing_stop(self):
+        if self.pairing_timer:
+            self.pairing_timer.cancel()
+
+        async def stop_later():
+            await asyncio.sleep(self.config['echo']['pairing_seconds'])
+            with suppress(Exception):
+                await asyncio.to_thread(self.echo.stop_pairing)
+                LOG.info('Pairing mode timed out')
+        self.pairing_timer = asyncio.create_task(stop_later())
+
+    def set_speech_volume(self, level):
+        self.levels.speech_volume = level
+        self.config['tts']['speech_volume'] = level  # read for every reply and chime
+
+    async def media_volume(self, change, level=None):
+        """The Echo app owns the media volume (it pins it against Bluetooth sources), so ask
+        it to move its pinned level; it answers with the level actually applied."""
+        self.volume_reply = asyncio.get_running_loop().create_future()
+        await self.event(type='media_volume', change=change, level=level, step=controls.STEP)
+        try:
+            return await asyncio.wait_for(self.volume_reply, 5)
+        finally:
+            self.volume_reply = None
 
     async def retract(self):
         """Delete the cancelled request from the chat for everyone, and stop waiting."""
@@ -469,6 +585,8 @@ class Session:
                 task.result()
         finally:
             self.stop.set()
+            if self.pairing_timer:
+                self.pairing_timer.cancel()
             receiver.cancel()
             processor.cancel()
             telemetry.cancel()
@@ -481,6 +599,11 @@ async def serve(config, engines):
     state = Path(config['state_dir'])
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     store = Store(state / 'requests.sqlite3')
+    levels = controls.Levels(state, config['tts']['speech_volume'])
+    config['tts']['speech_volume'] = levels.speech_volume  # a spoken change outlives restarts
+    echo = controls.Echo(config['echo'])
+    jev = controls.Jev(config['jev']) if config['jev'].get('api_key') else None
+    LOG.info('Device commands: grammar%s', ' + Jev fallback' if jev else ' only (no jev.api_key)')
     active = False
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
     if config['calendar']['ical_urls']:
@@ -504,7 +627,7 @@ async def serve(config, engines):
             return
         active = True
         try:
-            await Session(ws, config, engines, store, calendar).run()
+            await Session(ws, config, engines, store, calendar, levels, echo, jev).run()
         except ConnectionClosed:
             pass
         except Exception:
