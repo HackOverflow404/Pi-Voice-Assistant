@@ -3,7 +3,7 @@
 # user service. Pairing is separate; see README.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-pi_host=${PI_HOST:-tps-l2}
+pi_host=${PI_HOST:-mainframe}
 case ${1:-} in
   '') ./build-bridge.sh ;;
   --no-build) [[ -f dist/wa-bridge ]] || { echo 'No dist/wa-bridge; run without --no-build.' >&2; exit 1; } ;;

@@ -3,8 +3,8 @@
 # through the Pi's adb connection. The Pi (2 GB RAM) cannot run Gradle itself.
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-pi_host=${PI_HOST:-tps-l2}
-pi_dir=${PI_DIR:-HAL}
+pi_host=${PI_HOST:-mainframe}
+pi_dir=${PI_DIR:-Clippy}
 apk=dist/pi-voice-assistant-debug.apk
 case ${1:-} in
   '') ./build-apk.sh ;;

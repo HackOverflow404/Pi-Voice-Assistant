@@ -137,17 +137,17 @@ Pair once, with your phone number (country code, digits only). The command print
 a device → Link with phone number instead** and enter it:
 
 ```sh
-ssh tps-l2 'curl -sS -X POST 127.0.0.1:8766/pair -d "{\"phone\": \"15551234567\"}"'
-ssh tps-l2 'curl -sS 127.0.0.1:8766/status'            # {"paired":true,"connected":true,...}
-ssh tps-l2 'curl -sS "127.0.0.1:8766/contacts?q=instinct"'
-ssh tps-l2 'curl -sS "127.0.0.1:8766/chat?contact=Instinct"'  # recent messages, for debugging
+ssh mainframe 'curl -sS -X POST 127.0.0.1:8766/pair -d "{\"phone\": \"15551234567\"}"'
+ssh mainframe 'curl -sS 127.0.0.1:8766/status'            # {"paired":true,"connected":true,...}
+ssh mainframe 'curl -sS "127.0.0.1:8766/contacts?q=instinct"'
+ssh mainframe 'curl -sS "127.0.0.1:8766/chat?contact=Instinct"'  # recent messages, for debugging
 ```
 
 If the pairing code is rejected ("Couldn't link device"), scan a QR code instead:
 tunnel the bridge to this machine and open its page, then use **Link a device** and scan.
 
 ```sh
-ssh -N -L 18766:127.0.0.1:8766 tps-l2 &
+ssh -N -L 18766:127.0.0.1:8766 mainframe &
 xdg-open http://127.0.0.1:18766/qr
 ```
 
@@ -198,7 +198,7 @@ build on the development machine and install through the Pi's adb:
 ```sh
 ./deploy-apk.sh              # build, scp to $PI_HOST:$PI_DIR/dist, adb install, launch
 ./deploy-apk.sh --no-build   # redeploy the existing dist/ APK
-# Defaults: PI_HOST=tps-l2 PI_DIR=HAL
+# Defaults: PI_HOST=mainframe PI_DIR=Clippy
 ```
 
 ## Dashboard
