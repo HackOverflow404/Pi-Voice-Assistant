@@ -63,6 +63,11 @@ echo:
   adb_serial: null
   # "Start pairing" keeps the Echo discoverable this long, then returns to the dashboard.
   pairing_seconds: 120
+lamp:
+  # The RF desk lamp, pressed through its remote wired to this Pi (the rf-lamp project).
+  # Run with the system Python, which has pigpio. Empty: lamp commands say it isn't set up.
+  command: []
+  # command: [/usr/bin/python3, /home/user/rf-lamp/send.py]
 jev:
   # Optional. TypeSafe's Jev routes what the grammar doesn't recognize: a request for
   # Instinct, a device command, a cancellation, or an accidental trigger. The transcript

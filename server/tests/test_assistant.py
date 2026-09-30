@@ -478,6 +478,25 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.until('idle')
         self.assertEqual(self.sent, [])
 
+    async def test_lamp_command_is_handled_locally(self):
+        pressed = []
+        class FakeLamp:
+            def press(self, action): pressed.append(action)
+        self.session.lamp = FakeLamp()
+        await self.say('Hey Clippy, make the lamp warmer.')
+        start = next(e for e in await self.until('audio_start') if isinstance(e, dict) and e.get('type') == 'audio_start')
+        self.assertEqual(pressed, ['lamp_warmer'])
+        self.assertEqual(self.session.reply, 'Lamp warmer.')
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': start['id']}))
+        await self.until('idle')
+        self.assertEqual(self.sent, [])  # never sent to Instinct
+
+    async def test_lamp_without_config_says_so(self):
+        await self.say('Turn the lamp on.')
+        await self.until('audio_start')
+        self.assertEqual(self.session.reply, "The lamp isn't set up yet.")
+        self.assertEqual(self.sent, [])
+
     async def test_jev_can_discard_an_accidental_trigger(self):
         class Router:
             def decide(self, text): return 'accidental', 0.9

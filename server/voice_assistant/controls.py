@@ -1,5 +1,5 @@
-"""Spoken device commands for the Echo: Bluetooth pairing and the system (media) and
-assistant voice volumes.
+"""Spoken device commands: the Echo's Bluetooth pairing and system (media) and assistant
+voice volumes, and the RF desk lamp (through its remote, wired to the Pi; see rf-lamp).
 
 Every transcript is routed one of four ways: a device command (handled here, never sent),
 a cancellation, an accidental trigger (both discarded), or a request for Instinct. A small
@@ -17,8 +17,24 @@ import urllib.request
 
 from . import skills
 
+# The lamp's 12 remote buttons: action -> (rf-lamp button name, what it does, spoken reply).
+# The lamp can't report its state, so on/off is a toggle and is confirmed as one.
+LAMP = {
+    'lamp_on_off': ('on/off', 'Turn the desk lamp on or off (one toggle button).', 'Toggled the lamp.'),
+    'lamp_timer': ('1h', "Start the lamp's one-hour auto-off timer.", 'The lamp will turn off in an hour.'),
+    'lamp_brighter': ('brightness up', 'Make the lamp brighter.', 'Lamp brighter.'),
+    'lamp_dimmer': ('brightness down', 'Make the lamp dimmer.', 'Lamp dimmer.'),
+    'lamp_warmer': ('warmth up', "Make the lamp's light warmer, more yellow.", 'Lamp warmer.'),
+    'lamp_cooler': ('warmth down', "Make the lamp's light cooler, whiter or bluer.", 'Lamp cooler.'),
+    'lamp_sun': ('sun', "Set the lamp to its bright daylight (sun) preset.", 'Lamp on sun mode.'),
+    'lamp_k': ('k', "Press the lamp's K (colour temperature) button.", 'Lamp K mode.'),
+    'lamp_night': ('night', "Set the lamp to its dim night light preset.", 'Night light on.'),
+    'lamp_milk': ('milk', "Set the lamp to its soft milky white preset.", 'Lamp on milk mode.'),
+    'lamp_book': ('book', "Set the lamp to its reading (book) preset.", 'Reading light on.'),
+    'lamp_laptop': ('laptop', "Set the lamp to its laptop or screen-work preset.", 'Lamp on laptop mode.'),
+}
 ACTIONS = ('pairing_on', 'pairing_off', 'system_up', 'system_down', 'system_set',
-           'ai_up', 'ai_down', 'ai_set')
+           'ai_up', 'ai_down', 'ai_set', *LAMP)
 STEP = 0.1  # "volume up/down" moves this fraction of the full range
 
 
@@ -119,10 +135,55 @@ def target_of(word):
     return 'ai' if word and re.fullmatch(AI, word) else 'system'
 
 
+LAMP_WORD = r'(?:the |my |desk )*(?:lamp|light|lights)'
+TURN = r'(?:turn|switch|flip|put)'
+LAMP_PATTERNS = [
+    (re.compile(rf'(?:{TURN} (?:on|off) {LAMP_WORD}|{TURN} {LAMP_WORD} (?:on|off)|{LAMP_WORD} (?:on|off)|'
+                rf'toggle {LAMP_WORD})'), 'lamp_on_off'),
+    # The lamp must be named: "set a one hour timer" alone is the timers skill's.
+    (re.compile(rf'(?:(?:set|start) (?:an? |the |one )?(?:1 |one )?hour (?:lamp|light) timer|'
+                rf'(?:set|start) (?:an? |the |one )?(?:1 |one )?hour timer (?:for|on) {LAMP_WORD}|'
+                rf'{LAMP_WORD} (?:1 |one )?hour timer|{LAMP_WORD} timer|'
+                rf'{TURN} (?:off )?{LAMP_WORD}(?: off)? in (?:an|one|1) hour)'), 'lamp_timer'),
+    (re.compile(rf'(?:make {LAMP_WORD} brighter|brighten {LAMP_WORD}|{LAMP_WORD} brighter|'
+                rf'{LAMP_WORD} brightness up|(?:turn|bring) (?:up {LAMP_WORD}|{LAMP_WORD} up))'), 'lamp_brighter'),
+    (re.compile(rf'(?:make {LAMP_WORD} dimmer|dim {LAMP_WORD}|{LAMP_WORD} dimmer|'
+                rf'{LAMP_WORD} brightness down|(?:turn|bring) (?:down {LAMP_WORD}|{LAMP_WORD} down))'), 'lamp_dimmer'),
+    (re.compile(rf'(?:make {LAMP_WORD} warmer|{LAMP_WORD} warmer|{LAMP_WORD} warmth up|warmer {LAMP_WORD})'),
+     'lamp_warmer'),
+    (re.compile(rf'(?:make {LAMP_WORD} (?:cooler|colder)|{LAMP_WORD} (?:cooler|colder)|{LAMP_WORD} warmth down|'
+                rf'(?:cooler|colder) {LAMP_WORD})'), 'lamp_cooler'),
+]
+# Presets by name: "lamp to sun mode", "book mode", "set the light to reading", "night light".
+PRESETS = {'sun': 'lamp_sun', 'daylight': 'lamp_sun', 'k': 'lamp_k', 'kay': 'lamp_k', 'night': 'lamp_night',
+           'night light': 'lamp_night', 'milk': 'lamp_milk', 'book': 'lamp_book', 'reading': 'lamp_book',
+           'laptop': 'lamp_laptop', 'computer': 'lamp_laptop'}
+PRESET = '|'.join(sorted(PRESETS, key=len, reverse=True))
+PRESET_PATTERN = re.compile(
+    rf'(?:(?:set|switch|put|change|turn) {LAMP_WORD} (?:to|on|onto) (?:the )?|{LAMP_WORD} (?:to |on )?(?:the )?|'
+    rf'(?:the )?)(?P<preset>{PRESET})(?: (?P<mode>mode|preset|setting|light))?(?: on {LAMP_WORD})?')
+
+
+def parse_lamp(said):
+    for pattern, action in LAMP_PATTERNS:
+        if pattern.fullmatch(said):
+            return Command(action)
+    match = PRESET_PATTERN.fullmatch(said)
+    # A preset word alone ("book", "the sun") is too ambiguous: it counts only with the lamp
+    # named, a mode word ("book mode", "reading light"), or as "night light" itself.
+    if match and (re.search(rf'\b{LAMP_WORD}\b', said) or match.group('mode')
+                  or match.group('preset') == 'night light'):
+        return Command(PRESETS[match.group('preset')])
+    return None
+
+
 def parse(text):
     """The device command that the whole utterance is, or None. It must match in full, so
     a question that merely mentions volume or pairing still goes to Instinct."""
     said = normalize(text)
+    lamp = parse_lamp(said)
+    if lamp:
+        return lamp
     if PAIRING_ON.fullmatch(said):
         return Command('pairing_on')
     if PAIRING_OFF.fullmatch(said):
@@ -152,7 +213,9 @@ ROUTES = {
     'instinct': 'A genuine request, question or message meant for the voice assistant that the '
                 'speaker cannot answer by itself: knowledge, assignments, email, reminders, messages, '
                 'and advanced math (algebra, calculus, statistics, proofs, unit conversions, word problems).',
-    'device': 'Something this speaker does itself: Bluetooth pairing mode or volume; setting, pausing, '
+    'device': 'Something this speaker does itself: Bluetooth pairing mode or volume; the desk lamp (on or '
+              'off, brighter, dimmer, warmer, cooler, a one-hour timer, or presets like sun, night, milk, '
+              'reading and laptop); setting, pausing, '
               'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
               'stopwatch; saying the current time or date; simple arithmetic; or the local weather or the '
               'user\'s calendar events. Not advanced math, assignments, email or general knowledge.',
@@ -186,6 +249,7 @@ DEVICE_ACTIONS = {
     'math': 'Simple arithmetic: adding, subtracting, multiplying, dividing, percentages, powers or square roots of numbers.',
     'weather_query': 'Ask about the local weather or temperature, now or tomorrow.',
     'calendar_query': 'Ask what is on the user\'s calendar or schedule today or tomorrow, or what is next.',
+    **{action: description for action, (_, description, _) in LAMP.items()},
     'none': 'Not a device command.',
 }
 
@@ -245,6 +309,23 @@ class Jev:
                 return 'instinct', probability
             return Command(action['choice'], level), probability
         return Command(action['choice']), probability
+
+
+# ---------------------------------------------------------------- the desk lamp
+
+class Lamp:
+    """Presses the lamp's remote buttons by running rf-lamp's send.py, which drives the
+    remote's data line from a GPIO. It runs under the system Python, which has pigpio."""
+    def __init__(self, config, run=subprocess.run):
+        self.command = list(config['command'])
+        self.run_process = run
+
+    def press(self, action):
+        button = LAMP[action][0]
+        result = self.run_process(self.command + [button], capture_output=True, text=True, timeout=15,
+                                  stdin=subprocess.DEVNULL)
+        if result.returncode != 0:
+            raise RuntimeError(f'lamp {button} failed: {(result.stderr or result.stdout).strip()[:200]}')
 
 
 # ---------------------------------------------------------------- the Echo, over the Pi's adb

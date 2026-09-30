@@ -3,7 +3,8 @@ import tempfile
 import unittest
 
 from voice_assistant import controls
-from voice_assistant.controls import Command, Echo, Jev, Levels, parse, spoken_level
+from voice_assistant import skills
+from voice_assistant.controls import Command, Echo, Jev, Lamp, Levels, parse, spoken_level
 
 
 class GrammarTests(unittest.TestCase):
@@ -88,6 +89,50 @@ class JevTests(unittest.TestCase):
         self.assertEqual(FakeJev('device', 0.9, 'system_set').decide('music at forty percent please')[0],
                          Command('system_set', 0.4))
         self.assertEqual(FakeJev('device', 0.9, 'system_set').decide('change the volume')[0], 'instinct')
+
+
+class LampGrammarTests(unittest.TestCase):
+    def test_lamp_commands(self):
+        cases = {'Turn the lamp off.': 'lamp_on_off', 'Hey Clippy, lamp on': 'lamp_on_off',
+                 'Lights off please': 'lamp_on_off', 'Toggle the light': 'lamp_on_off',
+                 'Make the lamp brighter': 'lamp_brighter', 'Turn up the lamp': 'lamp_brighter',
+                 'Dim the lamp': 'lamp_dimmer', 'Make the light warmer': 'lamp_warmer', 'Lamp cooler': 'lamp_cooler',
+                 'Turn the lamp off in an hour': 'lamp_timer', 'Set a one hour lamp timer': 'lamp_timer',
+                 'Set the lamp to book mode': 'lamp_book', 'Reading light': 'lamp_book', 'Night light': 'lamp_night',
+                 'Lamp to sun': 'lamp_sun', 'Set the light to laptop mode': 'lamp_laptop', 'K mode': 'lamp_k',
+                 'Milk mode on the lamp': 'lamp_milk'}
+        for said, action in cases.items():
+            self.assertEqual(parse(said), Command(action), said)
+
+    def test_not_lamp_commands(self):
+        for said in ('the book', 'sun', 'Night', 'Read the book', 'What time does the lamp store close?',
+                     'Buy a new lamp', 'Is the light on in the kitchen?'):
+            self.assertIsNone(parse(said), said)
+        self.assertEqual(parse('Turn it up'), Command('system_up'))  # volume, not the lamp
+
+    def test_plain_timer_stays_with_the_timers_skill(self):
+        self.assertIsNone(parse('Set a one hour timer'))
+        self.assertEqual(skills.parse('Set a one hour timer').action, 'timer_start')
+
+    def test_every_button_is_reachable_through_jev(self):
+        self.assertTrue(set(controls.LAMP) <= set(controls.DEVICE_ACTIONS) and set(controls.LAMP) <= set(controls.ACTIONS))
+        self.assertEqual(FakeJev('device', 0.9, 'lamp_book').decide('make it cozy for reading')[0], Command('lamp_book'))
+
+
+class LampTests(unittest.TestCase):
+    def test_press_runs_send_with_the_button_name(self):
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout='Sent', stderr='')
+        Lamp({'command': ['/usr/bin/python3', '/home/user/rf-lamp/send.py']}, run).press('lamp_dimmer')
+        self.assertEqual(calls, [['/usr/bin/python3', '/home/user/rf-lamp/send.py', 'brightness down']])
+
+    def test_press_failure_raises(self):
+        def fail(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, stdout='', stderr='the remote is transmitting')
+        with self.assertRaises(RuntimeError):
+            Lamp({'command': ['send']}, fail).press('lamp_on_off')
 
 
 class Recorder:

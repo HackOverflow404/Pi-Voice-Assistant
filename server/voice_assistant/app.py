@@ -73,6 +73,11 @@ def load_config(path):
     echo.setdefault('pairing_seconds', 120)
     if not 10 <= echo['pairing_seconds'] <= 600:
         raise ValueError('echo.pairing_seconds must be between 10 and 600')
+    lamp = c.setdefault('lamp', {}) or {}
+    c['lamp'] = lamp
+    lamp.setdefault('command', [])
+    if not isinstance(lamp['command'], list):
+        raise ValueError('lamp.command must be a list, e.g. [/usr/bin/python3, /home/user/rf-lamp/send.py]')
     jev = c.setdefault('jev', {}) or {}
     c['jev'] = jev
     jev.setdefault('api_key', '')
@@ -169,9 +174,10 @@ def system_stats():
 
 class Session:
     def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
-                 clock=None, weather=None):
+                 clock=None, weather=None, lamp=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
+        self.lamp = lamp  # controls.Lamp, or None when lamp.command isn't configured
         self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         self.messenger = WhatsApp(config['whatsapp'])
@@ -499,6 +505,12 @@ class Session:
                     self.pairing_timer.cancel()
                 await self.blocking(self.echo.stop_pairing)
                 self.reply = 'Pairing mode is off.'
+            elif command.action in controls.LAMP:
+                if not self.lamp:
+                    self.reply = "The lamp isn't set up yet."
+                else:
+                    await self.blocking(self.lamp.press, command.action)
+                    self.reply = controls.LAMP[command.action][2]
             elif command.action.startswith('ai_'):
                 current = self.levels.speech_volume
                 level = {'ai_up': current + controls.STEP, 'ai_down': current - controls.STEP}.get(
@@ -510,8 +522,11 @@ class Session:
                 self.reply = 'The speaker is muted.' if level == 0 else f'Volume {controls.percent(level)}.'
         except Exception as exc:
             LOG.warning('Device command %s failed: %s', command.action, exc)
-            self.error = 'Could not control the Echo'
-            self.reply = 'Sorry, I could not change that on the Echo.'
+            if command.action in controls.LAMP:
+                self.error, self.reply = 'Could not reach the lamp', "Sorry, I couldn't reach the lamp."
+            else:
+                self.error = 'Could not control the Echo'
+                self.reply = 'Sorry, I could not change that on the Echo.'
         await self.speak(self.reply, audio_id=f'control-{uuid.uuid4().hex[:8]}')
 
     def start_pairing(self):
@@ -688,6 +703,7 @@ async def serve(config, engines):
     config['tts']['speech_volume'] = levels.speech_volume  # a spoken change outlives restarts
     echo = controls.Echo(config['echo'])
     jev = controls.Jev(config['jev']) if config['jev'].get('api_key') else None
+    lamp = controls.Lamp(config['lamp']) if config['lamp']['command'] else None
     clock, weather = skills.Clock(state), skills.Weather()
 
     async def ticker():  # finished timers start ringing, even with no Echo connected
@@ -696,7 +712,8 @@ async def serve(config, engines):
                 clock.tick()
             await asyncio.sleep(0.5)
     clock_task = asyncio.create_task(ticker())  # noqa: F841 (kept referenced)
-    LOG.info('Device commands: grammar%s', ' + Jev fallback' if jev else ' only (no jev.api_key)')
+    LOG.info('Device commands: grammar%s; lamp %s', ' + Jev fallback' if jev else ' only (no jev.api_key)',
+             'enabled' if lamp else 'not configured')
     current = None  # (connection, finished event) of the connected microphone
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
     if config['calendar']['ical_urls']:
@@ -731,7 +748,7 @@ async def serve(config, engines):
         done = asyncio.Event()
         current = (ws, done)
         try:
-            await Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather).run()
+            await Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather, lamp=lamp).run()
         except ConnectionClosed:
             pass
         except Exception:
