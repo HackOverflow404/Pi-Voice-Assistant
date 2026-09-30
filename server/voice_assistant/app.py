@@ -697,7 +697,7 @@ async def serve(config, engines):
             await asyncio.sleep(0.5)
     clock_task = asyncio.create_task(ticker())  # noqa: F841 (kept referenced)
     LOG.info('Device commands: grammar%s', ' + Jev fallback' if jev else ' only (no jev.api_key)')
-    active = False
+    current = None  # (connection, finished event) of the connected microphone
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
     if config['calendar']['ical_urls']:
         calendar = agenda.Shared()
@@ -710,15 +710,26 @@ async def serve(config, engines):
         refresher = asyncio.create_task(refresh())
 
     async def handler(ws):
-        nonlocal active
+        nonlocal current
         auth = ws.request.headers.get('Authorization', '')
         if not hmac.compare_digest(auth.encode(), ('Bearer ' + config['server']['token']).encode()):
             await ws.close(1008, 'Unauthorized')
             return
-        if active:
-            await ws.close(1013, 'Another microphone client is connected')
-            return
-        active = True
+        if current:
+            # One microphone at a time. After a Wi-Fi blip the Echo reconnects before the old
+            # connection has timed out here, so a new authenticated connection replaces the old
+            # one instead of being refused until it does.
+            old_ws, old_done = current
+            LOG.info('Replacing the previous microphone connection')
+            try:
+                await asyncio.wait_for(old_ws.close(1012, 'Replaced by a new connection'), 2)
+            except Exception:
+                with suppress(Exception):
+                    old_ws.transport.abort()  # the old peer is gone; don't wait for its handshake
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(old_done.wait(), 10)
+        done = asyncio.Event()
+        current = (ws, done)
         try:
             await Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather).run()
         except ConnectionClosed:
@@ -726,7 +737,9 @@ async def serve(config, engines):
         except Exception:
             LOG.exception('Session ended')
         finally:
-            active = False
+            done.set()
+            if current and current[0] is ws:
+                current = None
 
     tls = None
     c = config['server']

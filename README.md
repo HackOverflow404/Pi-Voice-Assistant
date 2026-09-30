@@ -382,7 +382,8 @@ adb uninstall com.instinct.voice
 
 - WebSocket URL: `ws://host:8765` (or `wss://` with configured TLS).
   Header: `Authorization: Bearer <server.token>`. Invalid tokens close with 1008;
-  a second microphone closes with 1013.
+  a new authenticated connection replaces the previous one (closed with 1012), so the Echo
+  recovers at once after a network blip.
 - Client → server binary messages: raw **16,000 Hz, mono, signed 16-bit
   little-endian PCM**, no WAV header. Android sends 1,280-sample / 2,560-byte
   chunks every 80 ms. Complete-sample fragments are reassembled by the server.
