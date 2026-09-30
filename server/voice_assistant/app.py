@@ -737,6 +737,7 @@ async def serve(config, engines):
         except Exception:
             LOG.exception('Session ended')
         finally:
+            LOG.info('Microphone connection ended: code %s %s', ws.close_code, ws.close_reason or '')
             done.set()
             if current and current[0] is ws:
                 current = None

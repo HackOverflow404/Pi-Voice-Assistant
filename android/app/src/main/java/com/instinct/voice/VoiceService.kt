@@ -138,6 +138,7 @@ class VoiceService : Service() {
                     } catch (cancel: CancellationException) {
                         throw cancel
                     } catch (error: Exception) {
+                        android.util.Log.w("VoiceService", "Connection lost: ${error.javaClass.simpleName}: ${error.message}")
                         State.connection("Reconnecting", error.message ?: "Connection interrupted")
                     }
                     if (System.currentTimeMillis() - connectedAt > 30000) backoff = 1000
