@@ -15,11 +15,14 @@ audio:
   silence_seconds: 1.0
   start_timeout_seconds: 5.0
   max_utterance_seconds: 20.0
-  # Start of each recording ignored for speech detection, covering the listening chime.
-  listen_grace_seconds: 0.25
-  # A wake word only counts if the phrase is this many times louder than the room before it
-  # (real wakes measured 12-43x; false triggers from silence or TV 1.5-4x).
-  wake_min_ratio: 6
+  # Start of each recording ignored for speech detection, covering the listening chime (0.45 s,
+  # heard by the mic until ~0.8 s after listening starts). Still transcribed.
+  listen_grace_seconds: 1.0
+  # A wake word only counts if the phrase is this many times louder than the room before it.
+  # Real wakes have measured 3.3-43x depending on distance and mic level; false triggers from
+  # silence or TV 1.5-4x. Low values rely on the later filters (noise transcripts, the send
+  # countdown, Jev's accidental route) to catch the rest.
+  wake_min_ratio: 3
   # Keep the last five raw recordings in state/utterances for tuning. Off by default.
   debug_save_utterances: false
 whatsapp:

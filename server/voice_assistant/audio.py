@@ -50,9 +50,10 @@ def normalize(pcm, target=4000.0, max_gain=40.0):
 
 def wake_is_plausible(config, wake_levels, before_levels):
     """A wake-word hit counts only if the phrase was clearly louder than the room: the model
-    also fires on near-silence and on TV chatter. Real wakes measured 12-43x the noise
-    floor; false ones 1.5-4x. The room level comes from before the phrase, so the phrase
-    can't raise it; with no history yet, only the absolute minimum applies."""
+    also fires on near-silence and on TV chatter. Real wakes measured 3.3-43x the noise
+    floor depending on distance; false ones 1.5-4x. The room level comes from before the
+    phrase, so the phrase can't raise it; with no history yet, only the absolute minimum
+    applies."""
     peak = max(wake_levels, default=0.0)
     noise = sorted(before_levels)[len(before_levels) // 5] if before_levels else 0.0
     return peak >= max(20.0, config.get('wake_min_ratio', 6.0) * noise)
