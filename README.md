@@ -233,13 +233,37 @@ The wake-word model occasionally fires on near-silence or on TV and conversation
 - While waiting for the reply, tapping the card cancels the request and deletes the
   WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
 
+## Built-in skills
+
+These are answered on the Pi, never sent to Instinct:
+
+- **Timers:** "set a timer for 5 minutes", "set a pasta timer for 10 minutes", "an hour and a
+  half timer", "pause / resume / cancel the timer", "cancel all timers", "how much time is
+  left". Several can run at once. A finished timer is announced and the Echo repeats an alarm
+  chime until you say "stop" or tap it, for up to a minute. Timers are kept in
+  `state/clock.json`, so they survive reconnects and restarts.
+- **Stopwatch:** "start / pause / resume / stop the stopwatch", "what's the stopwatch at".
+- **Time and date:** "what time is it", "what day is it".
+- **Arithmetic:** "what's 12 times 7", "15 percent of 80", "square root of 144", "2 to the
+  power of 10", or the same with symbols. Anything beyond arithmetic (algebra, calculus,
+  statistics, word problems) goes to Instinct.
+- **Weather and calendar:** "what's the weather", "is it going to rain tomorrow" (Open-Meteo
+  for the Pi's location), "what's on my calendar today/tomorrow" (the `calendar.ical_urls` feed).
+
+While a timer or the stopwatch exists, it replaces the dashboard's weather tile: a countdown
+with a progress ring, Pause/Resume and Cancel buttons (compact rows for two or three), and an
+orange "Time's up" tile to dismiss. Common wordings are recognized by a fixed grammar; Jev
+(below) picks the skill for other wordings, and the Pi reads the duration or expression from
+the words, since Jev chooses rather than extracts values.
+
 ## Device commands
 
 After the wake word, a few phrases control the Echo itself instead of going to Instinct:
 
 - **Pairing:** "start pairing" / "pair a new device" opens the Echo's *Pair new device* screen,
-  which keeps it discoverable (under its Bluetooth name) for `echo.pairing_seconds`; "stop
-  pairing" returns to the dashboard. Accept the pairing prompt on the Echo's screen. The screen
+  which keeps it discoverable (under its Bluetooth name). As soon as a new device appears
+  among the Echo's paired devices, the Pi returns to the dashboard and says "Paired with …";
+  otherwise it returns after `echo.pairing_seconds`. "Stop pairing" returns at once. Accept the pairing prompt on the Echo's screen. The screen
   isn't exported to other apps, so the Pi runs `adb root` first (LineageOS userdebug builds allow it).
 - **System volume:** "volume up/down", "turn it up", "louder", "set the volume to 50 percent",
   "volume 7" (tenths), "max volume", "mute". The app holds media volume at this level instead of
