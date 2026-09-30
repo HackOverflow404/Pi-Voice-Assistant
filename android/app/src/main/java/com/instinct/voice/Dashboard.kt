@@ -22,6 +22,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -135,7 +139,12 @@ fun GlanceDashboard(
             Row(Modifier.fillMaxSize().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(Modifier.width(330.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     ClockTile(now, Modifier.height(150.dp).fillMaxWidth())
-                    WeatherTile(weather, weatherError, now, Modifier.weight(1f).fillMaxWidth())
+                    // Timers and the stopwatch take the weather tile's place while any exist.
+                    AnimatedContent(state.clockItems.isNotEmpty(), Modifier.weight(1f).fillMaxWidth(),
+                        transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) }, label = "left") { active ->
+                        if (active) TimersTile(state.clockItems, Modifier.fillMaxSize())
+                        else WeatherTile(weather, weatherError, now, Modifier.fillMaxSize())
+                    }
                 }
                 Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     AnimatedContent(conversation, Modifier.weight(1f).fillMaxWidth(),
@@ -464,5 +473,167 @@ private fun Stat(value: String?, label: String) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(value ?: "–", fontSize = 21.sp, fontWeight = FontWeight.Medium, lineHeight = 23.sp)
         Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = Faint, letterSpacing = 1.sp)
+    }
+}
+
+// ---------------------------------------------------------------- timers and the stopwatch
+
+private val WarmTile = Brush.linearGradient(listOf(Color(0xFF3F2712), Color(0xFF22150A)))
+private val RingTile = Brush.linearGradient(listOf(Color(0xFFFFB85C), Color(0xFFF26A3D)))
+private val RingInk = Color(0xFF2B1204)
+
+private fun clockText(ms: Long, tenths: Boolean = false): String {
+    val total = ms / 1000
+    val h = total / 3600
+    val m = (total % 3600) / 60
+    val sec = total % 60
+    val base = if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
+    return if (tenths) base + ".%d".format((ms % 1000) / 100) else base
+}
+
+private fun ClockItem.title() = when {
+    kind == "stopwatch" -> "Stopwatch"
+    label.isNotBlank() -> label.replaceFirstChar { it.uppercase() } + " timer"
+    else -> "Timer"
+}
+
+private fun ClockItem.accent() = if (kind == "stopwatch") Mint else Tangerine
+
+/** Time shown, and how full the ring is: a timer's ring drains, the stopwatch's sweeps each minute. */
+private fun ClockItem.reading(now: Long): Pair<String, Float> =
+    if (kind == "stopwatch") {
+        val elapsed = elapsed(now)
+        clockText(elapsed, tenths = true) to (elapsed % 60_000) / 60_000f
+    } else {
+        val left = remaining(now)
+        clockText(left + 999) to if (durationMs > 0) left.toFloat() / durationMs else 0f
+    }
+
+@Composable
+private fun TimersTile(items: List<ClockItem>, modifier: Modifier) {
+    // The stopwatch shows tenths, so tick faster than the dashboard's once-a-second clock.
+    val fast = items.any { it.kind == "stopwatch" && it.state == "running" }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(fast) {
+        while (true) {
+            now = System.currentTimeMillis()
+            delay(if (fast) 100 else 250)
+        }
+    }
+    val ringing = items.filter { it.state == "ringing" }
+    if (ringing.isNotEmpty()) {
+        RingingTile(ringing, modifier)
+        return
+    }
+    Column(modifier.tile(if (items.all { it.kind == "stopwatch" }) TealTile else WarmTile)
+        .padding(horizontal = 20.dp, vertical = 16.dp)) {
+        if (items.size == 1) BigClockItem(items[0], now)
+        else Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.SpaceEvenly) {
+            items.take(3).forEach { CompactClockItem(it, now, large = items.size == 2) }
+        }
+    }
+}
+
+@Composable
+private fun ColumnScope.BigClockItem(item: ClockItem, now: Long) {
+    val (time, fraction) = item.reading(now)
+    val paused = item.state == "paused"
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Label(item.title(), item.accent())
+            Text(time, fontSize = if (time.length > 7) 42.sp else 52.sp, fontWeight = FontWeight.Light,
+                letterSpacing = (-2).sp, maxLines = 1, softWrap = false)
+            Text(if (paused) "Paused" else if (item.kind == "stopwatch") "Running"
+                 else "of " + clockText(item.durationMs), color = Soft, fontSize = 15.sp)
+        }
+        ProgressRing(fraction, item.accent(), paused, Modifier.size(84.dp))
+    }
+    Spacer(Modifier.weight(1f))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ActionPill(if (paused) "Resume" else "Pause", paused, onClick = {
+            VoiceService.clockAction(item.id, if (paused) "resume" else "pause") })
+        ActionPill(if (item.kind == "stopwatch") "Stop" else "Cancel", null, onClick = {
+            VoiceService.clockAction(item.id, "stop") })
+    }
+}
+
+@Composable
+private fun CompactClockItem(item: ClockItem, now: Long, large: Boolean) {
+    val (time, fraction) = item.reading(now)
+    val paused = item.state == "paused"
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        ProgressRing(fraction, item.accent(), paused, Modifier.size(if (large) 54.dp else 38.dp))
+        Spacer(Modifier.width(14.dp))
+        Column(Modifier.weight(1f)) {
+            Text(time, fontSize = if (large) 32.sp else 24.sp, fontWeight = FontWeight.Light,
+                lineHeight = if (large) 34.sp else 26.sp, maxLines = 1)
+            Text(item.title() + if (paused) " · paused" else "", color = Soft, fontSize = if (large) 15.sp else 13.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis)
+        }
+        RoundButton(onClick = { VoiceService.clockAction(item.id, if (paused) "resume" else "pause") }) {
+            if (paused) Icon(Icons.Filled.PlayArrow, "Resume", tint = Ink, modifier = Modifier.size(20.dp)) else PauseGlyph()
+        }
+        Spacer(Modifier.width(8.dp))
+        RoundButton(onClick = { VoiceService.clockAction(item.id, "stop") }) {
+            Icon(Icons.Filled.Close, "Cancel", tint = Ink, modifier = Modifier.size(18.dp))
+        }
+    }
+}
+
+@Composable
+private fun RingingTile(ringing: List<ClockItem>, modifier: Modifier) {
+    val pulse by rememberInfiniteTransition(label = "ring").animateFloat(0.85f, 1f,
+        infiniteRepeatable(tween(600), RepeatMode.Reverse), label = "pulse")
+    Column(modifier.tile(RingTile).alpha(pulse)
+        .clickable { ringing.forEach { VoiceService.clockAction(it.id, "dismiss") } }
+        .padding(horizontal = 22.dp, vertical = 18.dp)) {
+        Label("Time's up", RingInk.copy(alpha = 0.7f))
+        Spacer(Modifier.height(6.dp))
+        Text(ringing.joinToString(", ") { it.title() }, color = RingInk, fontSize = 32.sp, fontWeight = FontWeight.SemiBold,
+            lineHeight = 36.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.weight(1f))
+        Text("Tap to dismiss, or say \u201cstop\u201d", color = RingInk, fontSize = 16.sp, fontWeight = FontWeight.Medium,
+            modifier = Modifier.clip(RoundedCornerShape(50)).background(Color(0x33FFFFFF))
+                .padding(horizontal = 14.dp, vertical = 8.dp))
+    }
+}
+
+@Composable
+private fun ProgressRing(fraction: Float, color: Color, paused: Boolean, modifier: Modifier) {
+    Canvas(modifier) {
+        val stroke = size.minDimension * 0.1f
+        val inset = stroke / 2
+        val arcSize = androidx.compose.ui.geometry.Size(size.width - stroke, size.height - stroke)
+        drawArc(Color(0x26FFFFFF), 0f, 360f, false, Offset(inset, inset), arcSize, style = Stroke(stroke))
+        drawArc(if (paused) color.copy(alpha = 0.45f) else color, -90f, 360f * fraction.coerceIn(0f, 1f), false,
+            Offset(inset, inset), arcSize, style = Stroke(stroke, cap = StrokeCap.Round))
+    }
+}
+
+@Composable
+private fun ActionPill(text: String, resume: Boolean?, onClick: () -> Unit) {
+    Row(Modifier.clip(RoundedCornerShape(50)).background(Color(0x1FFFFFFF)).clickable(onClick = onClick)
+        .padding(horizontal = 16.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        when (resume) {
+            true -> Icon(Icons.Filled.PlayArrow, null, tint = Ink, modifier = Modifier.size(18.dp))
+            false -> PauseGlyph(14.dp)
+            null -> Icon(Icons.Filled.Close, null, tint = Ink, modifier = Modifier.size(16.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+private fun RoundButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+    Box(Modifier.size(38.dp).clip(CircleShape).background(Color(0x1FFFFFFF)).clickable(onClick = onClick),
+        contentAlignment = Alignment.Center) { content() }
+}
+
+/** Two bars; the core icon set has no pause icon. */
+@Composable
+private fun PauseGlyph(size: androidx.compose.ui.unit.Dp = 16.dp) {
+    Row(Modifier.size(size), horizontalArrangement = Arrangement.SpaceEvenly) {
+        repeat(2) { Box(Modifier.fillMaxHeight().width(size / 4).clip(RoundedCornerShape(2.dp)).background(Ink)) }
     }
 }

@@ -19,8 +19,20 @@ data class Dashboard(
     val running: Boolean = false,
     val pi: PiStatus? = null,
     /** Events the Pi reads from the configured iCal links; null until it sends any. */
-    val calendar: List<Event>? = null
+    val calendar: List<Event>? = null,
+    /** Timers and the stopwatch; the Pi keeps them, the dashboard shows them. */
+    val clockItems: List<ClockItem> = emptyList()
 )
+
+/** A timer or the stopwatch as the Pi last reported it; the dashboard counts on from there. */
+data class ClockItem(
+    val id: String, val kind: String, val label: String, val state: String,
+    val durationMs: Long, val remainingMs: Long, val elapsedMs: Long,
+    val receivedAt: Long = System.currentTimeMillis()
+) {
+    fun remaining(now: Long) = if (state == "running") (remainingMs - (now - receivedAt)).coerceAtLeast(0) else remainingMs
+    fun elapsed(now: Long) = if (state == "running") elapsedMs + (now - receivedAt) else elapsedMs
+}
 
 /** Pi health from the server's periodic `system` message; null fields were unavailable. */
 data class PiStatus(
@@ -43,6 +55,14 @@ object State {
             val e = list.getJSONObject(i)
             Event(e.optString("title", "(No title)"), e.getLong("begin"), e.getLong("end"),
                 e.optBoolean("all_day"), e.optLong("color", 0).toInt(), e.optString("location"))
+        })
+    }
+    fun timers(json: JSONObject) = mutable.update {
+        val list = json.getJSONArray("items")
+        it.copy(clockItems = (0 until list.length()).map { i ->
+            val t = list.getJSONObject(i)
+            ClockItem(t.getString("id"), t.getString("kind"), t.optString("label"), t.getString("state"),
+                t.optLong("duration_ms"), t.optLong("remaining_ms"), t.optLong("elapsed_ms"))
         })
     }
     fun system(json: JSONObject) = mutable.update {

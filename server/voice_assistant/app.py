@@ -1,4 +1,5 @@
 import argparse
+import datetime as dt
 import asyncio
 import re
 from collections import deque
@@ -14,7 +15,7 @@ import time
 import uuid
 import wave
 
-from . import agenda, controls
+from . import agenda, controls, skills
 from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_transcript, normalize, rms,
                     speech_threshold, wake_is_plausible)
 from .speech import chunks, speakable
@@ -167,9 +168,11 @@ def system_stats():
 
 
 class Session:
-    def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None):
+    def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
+                 clock=None, weather=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
+        self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         self.messenger = WhatsApp(config['whatsapp'])
         self.queue = asyncio.Queue(maxsize=25)  # 2 seconds maximum backlog
@@ -233,6 +236,8 @@ class Session:
             else:
                 try:
                     event = json.loads(data)
+                    if event.get('type') == 'clock' and self.clock:  # a tap on the timer tile
+                        self.clock.act(event.get('id'), event.get('action'))
                     if event.get('type') == 'cancel' and self.status in ('confirming', 'waiting'):
                         self.cancel.set()
                         self.abort.set()
@@ -414,7 +419,7 @@ class Session:
                 if decision == 'accidental':
                     await self.set_status('idle')
                     continue
-                if isinstance(decision, controls.Command):
+                if isinstance(decision, (controls.Command, skills.Skill)):
                     await self.control(decision)
                     await self.set_status('idle', self.error)
                     continue
@@ -456,7 +461,7 @@ class Session:
     async def route(self, text):
         """A device command from the grammar, else Jev's decision when it is configured,
         else 'instinct'. A Jev failure never loses the request: it goes to Instinct."""
-        command = controls.parse(text)
+        command = controls.parse(text) or skills.parse(text, ringing=bool(self.clock and self.clock.ringing()))
         if command or not self.jev:
             return command or 'instinct'
         started = time.monotonic()
@@ -469,15 +474,25 @@ class Session:
         return decision
 
     async def control(self, command):
-        """Carry out a device command on the Echo and confirm it aloud."""
+        """Carry out a device command or built-in skill and confirm it aloud."""
         LOG.info('Device command %s', command)
         self.reply, self.error = '', None
+        if isinstance(command, skills.Skill):
+            try:
+                self.reply = await self.run_skill(command)
+            except Exception as exc:
+                LOG.warning('Skill %s failed: %s', command.action, exc)
+                self.reply = "Sorry, I couldn't do that right now."
+            if self.reply:  # a dismissed alarm needs no answer
+                await self.speak(self.reply, audio_id=f'control-{uuid.uuid4().hex[:8]}')
+            return
         try:
             if command.action == 'pairing_on':
+                before = await self.blocking(self.echo.bonded)
                 name = await self.blocking(self.start_pairing)
                 seconds = self.config['echo']['pairing_seconds']
                 duration = f'{seconds // 60} minutes' if seconds % 60 == 0 and seconds > 60 else f'{seconds} seconds'
-                self.schedule_pairing_stop()
+                self.schedule_pairing_stop(before)
                 self.reply = f'Pairing mode is on. Connect to {name} within {duration}.'
             elif command.action == 'pairing_off':
                 if self.pairing_timer:
@@ -507,16 +522,80 @@ class Session:
                 return name
         return 'this speaker'
 
-    def schedule_pairing_stop(self):
+    def schedule_pairing_stop(self, before):
+        """Back to the dashboard as soon as a new device has paired (the Echo lists it among
+        its bonded devices), or when pairing_seconds run out; stop watching if the user has
+        already left the pairing screen."""
         if self.pairing_timer:
             self.pairing_timer.cancel()
 
-        async def stop_later():
-            await asyncio.sleep(self.config['echo']['pairing_seconds'])
+        async def watch():
+            deadline = time.monotonic() + self.config['echo']['pairing_seconds']
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2)
+                with suppress(Exception):
+                    if not await asyncio.to_thread(self.echo.pairing_open):
+                        return
+                    new = {a: n for a, n in (await asyncio.to_thread(self.echo.bonded)).items() if a not in before}
+                    if new:
+                        await asyncio.sleep(2)  # let the pairing dialog finish
+                        await asyncio.to_thread(self.echo.stop_pairing)
+                        name = next(iter(new.values())) or 'the new device'
+                        LOG.info('Paired with %s; back to the dashboard', name)
+                        await self.announce(f'Paired with {name}.')
+                        return
             with suppress(Exception):
                 await asyncio.to_thread(self.echo.stop_pairing)
                 LOG.info('Pairing mode timed out')
-        self.pairing_timer = asyncio.create_task(stop_later())
+        self.pairing_timer = asyncio.create_task(watch())
+
+    async def run_skill(self, skill):
+        """The answer to say for a built-in skill."""
+        clock, now = self.clock, dt.datetime.now().astimezone()
+        a = skill.action
+        if a == 'timer_start':
+            if not skill.seconds:
+                return 'How long should the timer be? Say, for example, set a timer for ten minutes.'
+            return clock.start_timer(skill.seconds, skill.label)
+        if a in ('timer_pause', 'timer_resume', 'timer_stop'):
+            method = {'timer_pause': clock.pause_timer, 'timer_resume': clock.resume_timer,
+                      'timer_stop': clock.stop_timer}[a]
+            # A bare "pause"/"resume" with no timer means the stopwatch.
+            if not clock.timers and clock.stopwatch and a != 'timer_stop':
+                return clock.pause_stopwatch() if a == 'timer_pause' else clock.resume_stopwatch()
+            return method(skill.label, skill.all)
+        if a == 'timer_query':
+            return clock.timer_status(skill.label)
+        if a == 'dismiss':
+            clock.dismiss()
+            return ''
+        if a.startswith('stopwatch_'):
+            return {'stopwatch_start': clock.start_stopwatch, 'stopwatch_pause': clock.pause_stopwatch,
+                    'stopwatch_resume': clock.resume_stopwatch, 'stopwatch_stop': clock.stop_stopwatch,
+                    'stopwatch_query': clock.stopwatch_status}[a]()
+        if a == 'time_query':
+            return skills.say_time(now)
+        if a == 'date_query':
+            return skills.say_date(now)
+        if a == 'math':
+            return skills.math_reply(skill)
+        if a == 'weather_query':
+            return await asyncio.to_thread(self.weather.report, skill.day)
+        if a == 'calendar_query':
+            return skills.calendar_report(self.calendar.events if self.calendar else None, now, skill.day)
+        return ''
+
+    def clock_changed(self):
+        """Push timers and the stopwatch to the Echo, and say when a timer finishes."""
+        loop = self.loop
+        ringing = {t.id for t in self.clock.timers if t.rang_at}
+        finished = [t for t in self.clock.timers if t.id in ringing - self.rang]
+        self.rang = ringing
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(
+            self.event(type='timers', items=self.clock.snapshot())))
+        for t in finished:
+            phrase = f'Your {t.label} timer is done.' if t.label else 'Your timer is done.'
+            loop.call_soon_threadsafe(lambda p=phrase: asyncio.ensure_future(self.announce(p)))
 
     def set_speech_volume(self, level):
         self.levels.speech_volume = level
@@ -576,6 +655,10 @@ class Session:
             await asyncio.sleep(5)
 
     async def run(self):
+        if self.clock:
+            self.loop, self.rang = asyncio.get_running_loop(), {t.id for t in self.clock.timers if t.rang_at}
+            self.clock.listeners.append(self.clock_changed)
+            await self.event(type='timers', items=self.clock.snapshot())
         receiver = asyncio.create_task(self.receive())
         processor = asyncio.create_task(self.process())
         telemetry = asyncio.create_task(self.telemetry())
@@ -585,6 +668,8 @@ class Session:
                 task.result()
         finally:
             self.stop.set()
+            if self.clock and self.clock_changed in self.clock.listeners:
+                self.clock.listeners.remove(self.clock_changed)
             if self.pairing_timer:
                 self.pairing_timer.cancel()
             receiver.cancel()
@@ -603,6 +688,14 @@ async def serve(config, engines):
     config['tts']['speech_volume'] = levels.speech_volume  # a spoken change outlives restarts
     echo = controls.Echo(config['echo'])
     jev = controls.Jev(config['jev']) if config['jev'].get('api_key') else None
+    clock, weather = skills.Clock(state), skills.Weather()
+
+    async def ticker():  # finished timers start ringing, even with no Echo connected
+        while True:
+            with suppress(Exception):
+                clock.tick()
+            await asyncio.sleep(0.5)
+    clock_task = asyncio.create_task(ticker())  # noqa: F841 (kept referenced)
     LOG.info('Device commands: grammar%s', ' + Jev fallback' if jev else ' only (no jev.api_key)')
     active = False
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
@@ -627,7 +720,7 @@ async def serve(config, engines):
             return
         active = True
         try:
-            await Session(ws, config, engines, store, calendar, levels, echo, jev).run()
+            await Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather).run()
         except ConnectionClosed:
             pass
         except Exception:

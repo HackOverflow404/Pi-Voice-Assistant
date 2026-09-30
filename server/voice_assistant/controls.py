@@ -15,6 +15,8 @@ import subprocess
 import urllib.error
 import urllib.request
 
+from . import skills
+
 ACTIONS = ('pairing_on', 'pairing_off', 'system_up', 'system_down', 'system_set',
            'ai_up', 'ai_down', 'ai_set')
 STEP = 0.1  # "volume up/down" moves this fraction of the full range
@@ -147,10 +149,13 @@ def parse(text):
 # ---------------------------------------------------------------- Jev (fallback router)
 
 ROUTES = {
-    'instinct': 'A genuine request, question or message meant for the voice assistant: anything '
-                'that is not control of this speaker, a cancellation, or noise.',
-    'device': 'A request to control this Echo Show speaker itself: turning Bluetooth pairing mode '
-              'on or off, or changing its system/media volume or the assistant\'s own voice volume.',
+    'instinct': 'A genuine request, question or message meant for the voice assistant that the '
+                'speaker cannot answer by itself: knowledge, assignments, email, reminders, messages, '
+                'and advanced math (algebra, calculus, statistics, proofs, unit conversions, word problems).',
+    'device': 'Something this speaker does itself: Bluetooth pairing mode or volume; setting, pausing, '
+              'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
+              'stopwatch; saying the current time or date; simple arithmetic; or the local weather or the '
+              'user\'s calendar events. Not advanced math, assignments, email or general knowledge.',
     'cancel': 'The speaker is cancelling or retracting their request, for example "never mind", '
               '"ignore that", "actually cancel" or "forget it".',
     'accidental': 'Not addressed to the assistant: background TV or conversation, a fragment, filler '
@@ -165,6 +170,22 @@ DEVICE_ACTIONS = {
     'ai_up': 'Raise the assistant\'s own speaking voice volume.',
     'ai_down': 'Lower the assistant\'s own speaking voice volume.',
     'ai_set': 'Set the assistant\'s own speaking voice volume to a specific level.',
+    'timer_start': 'Start a countdown timer for some duration.',
+    'timer_pause': 'Pause a running timer.',
+    'timer_resume': 'Resume a paused timer.',
+    'timer_stop': 'Cancel or stop a timer.',
+    'timer_query': 'Ask how much time is left on a timer.',
+    'dismiss': 'Silence a timer alarm that is ringing ("stop", "okay").',
+    'stopwatch_start': 'Start the stopwatch.',
+    'stopwatch_pause': 'Pause the stopwatch.',
+    'stopwatch_resume': 'Resume the stopwatch.',
+    'stopwatch_stop': 'Stop or reset the stopwatch.',
+    'stopwatch_query': 'Ask what the stopwatch shows.',
+    'time_query': 'Ask the current time.',
+    'date_query': 'Ask today\'s date or day of the week.',
+    'math': 'Simple arithmetic: adding, subtracting, multiplying, dividing, percentages, powers or square roots of numbers.',
+    'weather_query': 'Ask about the local weather or temperature, now or tomorrow.',
+    'calendar_query': 'Ask what is on the user\'s calendar or schedule today or tomorrow, or what is next.',
     'none': 'Not a device command.',
 }
 
@@ -187,7 +208,7 @@ class Jev:
                     'route': {'type': 'choice', 'instructions': 'What should happen with this transcript?',
                               'criteria': ROUTES},
                     'device_action': {'type': 'choice',
-                                      'instructions': 'If it asks to control the speaker, which control?',
+                                      'instructions': 'If the speaker should do this itself, which action?',
                                       'criteria': DEVICE_ACTIONS}}}
 
     def call(self, text):
@@ -211,7 +232,12 @@ class Jev:
         if route['choice'] in ('cancel', 'accidental'):
             return route['choice'], probability
         action = answers['device_action']
-        if action['choice'] not in ACTIONS or action['probabilities'].get(action['choice'], 0.0) < self.min_probability:
+        if action['probabilities'].get(action['choice'], 0.0) < self.min_probability:
+            return 'instinct', probability
+        if action['choice'] in skills.ACTIONS:
+            skill = skills.from_action(action['choice'], text)
+            return (skill or 'instinct'), probability
+        if action['choice'] not in ACTIONS:
             return 'instinct', probability
         if action['choice'].endswith('_set'):
             level = spoken_level(text)
@@ -253,6 +279,21 @@ class Echo:
         self.ensure_root()
         self.adb('shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
         self.adb('shell', 'am', 'start', '-n', SETTINGS, '-e', ':settings:show_fragment', PAIRING_FRAGMENT)
+
+    def bonded(self):
+        """{address: name} of the Echo's paired devices."""
+        devices, inside = {}, False
+        for line in self.adb('shell', 'dumpsys', 'bluetooth_manager').splitlines():
+            if line.strip() == 'Bonded devices:':
+                inside = True
+                continue
+            match = re.match(r'\s+([0-9A-F]{2}(?::[0-9A-F]{2}){5}) \[[^]]*\] ?(.*)', line) if inside else None
+            if not match:
+                if inside:
+                    break
+                continue
+            devices[match.group(1)] = match.group(2).strip()
+        return devices
 
     def pairing_open(self):
         activities = self.adb('shell', 'dumpsys', 'activity', 'activities')

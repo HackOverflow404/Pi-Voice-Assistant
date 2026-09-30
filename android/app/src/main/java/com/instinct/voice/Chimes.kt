@@ -20,9 +20,13 @@ object Chimes {
 
     private val listening by lazy { render(LISTENING) }
     private val sent by lazy { render(SENT) }
+    // A timer's alarm: the same soft voice, three notes rising, repeated while it rings.
+    private val ALARM = listOf(Triple(329.6, 0.0, 0.2), Triple(493.9, 0.13, 0.2), Triple(659.3, 0.26, 0.4))
+    private val alarmSound by lazy { render(ALARM) }
 
     fun listening(volume: Float) = play(listening, volume)
     fun sent(volume: Float) = play(sent, volume)
+    fun alarm(volume: Float) = play(alarmSound, volume)
 
     /** Sine notes that start 3% flat and glide up within ~25 ms, with a soft 6 ms attack and
      *  a quick exponential decay; a trace of the octave for roundness. Mixed and normalized

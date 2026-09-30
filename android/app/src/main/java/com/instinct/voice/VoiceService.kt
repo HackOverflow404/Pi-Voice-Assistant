@@ -48,6 +48,23 @@ class VoiceService : Service() {
     // sources, which scale their own audio, get the full speaker range and can't drift it;
     // the assistant's speech is attenuated per player instead.
     private val audio by lazy { getSystemService(AudioManager::class.java) }
+    private var alarm: Job? = null
+
+    /** While any timer is ringing, repeat the alarm chime (a little louder than speech). */
+    private fun updateAlarm(speechVolume: Float) {
+        val ringing = State.flow.value.clockItems.any { it.state == "ringing" }
+        if (ringing && alarm?.isActive != true) {
+            alarm = scope.launch {
+                while (isActive) {
+                    Chimes.alarm((speechVolume * 2.5f).coerceIn(0.25f, 1f))
+                    delay(2000)
+                }
+            }
+        } else if (!ringing) {
+            alarm?.cancel()
+            alarm = null
+        }
+    }
     private val volumeWatcher = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.getIntExtra(EXTRA_VOLUME_STREAM, -1) == AudioManager.STREAM_MUSIC) pinMediaVolume()
@@ -217,6 +234,10 @@ class VoiceService : Service() {
                             }
                             "system" -> State.system(json)
                             "calendar" -> State.calendar(json)
+                            "timers" -> {
+                                State.timers(json)
+                                updateAlarm(chimeVolume)
+                            }
                             "audio_start" -> {
                                 check(output == null) { "Overlapping audio transfer" }
                                 audioId = json.getString("id")
@@ -248,6 +269,8 @@ class VoiceService : Service() {
             }
         } finally {
             muted = true
+            alarm?.cancel()
+            alarm = null
             withContext(NonCancellable) { mic?.cancelAndJoin(); player.cancelAndJoin() }
             segments.close()
             output?.close()
@@ -342,6 +365,11 @@ class VoiceService : Service() {
         @Volatile private var current: VoiceService? = null
 
         /** Dashboard tap: discard the request before it is sent, or unsend it while waiting. */
+        /** A tap on the timer tile: "pause", "resume", "stop" or "dismiss" one timer or the stopwatch. */
+        fun clockAction(id: String, action: String) {
+            current?.socket?.send(JSONObject().put("type", "clock").put("id", id).put("action", action).toString())
+        }
+
         fun cancelRequest() {
             current?.socket?.send(JSONObject().put("type", "cancel").toString())
         }

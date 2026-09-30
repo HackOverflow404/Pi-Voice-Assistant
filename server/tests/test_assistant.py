@@ -378,7 +378,7 @@ class FakeSocket:
 class FakeEngines:
     def predict(self, frame): return 1
     def reset(self): pass
-    def transcribe(self, pcm): return 'What is the weather?'
+    def transcribe(self, pcm): return 'What assignments are due?'
     def synthesize(self, text):
         output = io.BytesIO()
         with wave.open(output, 'wb') as wav:
@@ -432,7 +432,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         data = b''.join(e for e in events if isinstance(e, bytes))
         with wave.open(io.BytesIO(data), 'rb') as wav:
             self.assertEqual(wav.getnframes(), 1280)
-        self.assertEqual(self.sent, ['What is the weather?'])
+        self.assertEqual(self.sent, ['What assignments are due?'])
         self.assertTrue(any(isinstance(e, dict) and e.get('type') == 'sent' and e['id'] == 'WA1' for e in events))
         self.assertEqual(self.store.latest()['message_id'], 'WA1')  # replies are matched to WhatsApp's ID
         self.assertEqual(self.store.latest()['status'], 'replied')
@@ -492,9 +492,9 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         class Router:
             def decide(self, text): raise RuntimeError('Jev 529: overloaded')
         self.session.jev = Router()
-        await self.say('What is the weather?')
+        await self.say('What assignments are due?')
         await self.until('audio_end')
-        self.assertEqual(self.sent, ['What is the weather?'])
+        self.assertEqual(self.sent, ['What assignments are due?'])
 
     async def test_reply_streams_one_segment_per_sentence(self):
         self.session.messenger.wait_reply = lambda *args: 'The first sentence is long enough. The second one too.'
@@ -562,6 +562,26 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(starts[0]['id'].startswith('announce-'))
         statuses = [e['status'] for e in events if isinstance(e, dict) and e.get('type') == 'status']
         self.assertEqual(statuses[-2:], ['waiting', 'speaking'])  # still waiting while announcing
+
+    async def test_timer_is_handled_on_the_pi(self):
+        from voice_assistant import skills
+        self.session.clock = skills.Clock(self.temp.name)
+        self.session.engines.transcribe = lambda pcm: 'Set a pasta timer for 5 minutes.'
+        await self.speak_request()
+        seen = []  # the confirmation and the timer update arrive in either order
+        while not ({'speaking', 'timers'} <= {e.get('status') or e.get('type') for e in seen if isinstance(e, dict)}):
+            seen.append(await self.event())
+        timers = [e for e in seen if isinstance(e, dict) and e.get('type') == 'timers' and e['items']]
+        self.assertEqual(timers[-1]['items'][-1]['label'], 'pasta')
+        self.assertEqual(self.session.reply, 'Pasta timer set for 5 minutes.')
+        self.assertEqual(self.sent, [])
+        timer_id = self.session.clock.timers[0].id
+        await self.socket.incoming.put(json.dumps({'type': 'clock', 'id': timer_id, 'action': 'pause'}))
+        for _ in range(100):
+            if self.session.clock.timers[0].state == 'paused':
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(self.session.clock.timers[0].state, 'paused')
 
     async def test_cancel_during_grace_period_sends_nothing(self):
         self.config['whatsapp']['send_delay_seconds'] = 2
