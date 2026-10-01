@@ -1,10 +1,7 @@
 package com.instinct.voice
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -176,8 +173,9 @@ private fun ClockTile(now: LocalDateTime, modifier: Modifier) {
             Text(now.format(clockFormat), fontSize = 88.sp, fontWeight = FontWeight.ExtraLight,
                 letterSpacing = (-4).sp, lineHeight = 88.sp, maxLines = 1, softWrap = false)
         }
-        val progress by animateFloatAsState((now.second + 1) / 60f,
-            if (now.second == 59) snap() else tween(1000, easing = LinearEasing), label = "minute")
+        // Step once a second with the clock. A tween here restarted every second and kept the
+        // Echo rendering at 60 fps all day, starving its Bluetooth speaker of CPU.
+        val progress = (now.second + 1) / 60f
         Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(3.dp)
             .background(Brush.horizontalGradient(listOf(Tangerine.copy(alpha = 0.2f), Tangerine))))
     }
