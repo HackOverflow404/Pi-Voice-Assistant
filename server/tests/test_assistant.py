@@ -499,6 +499,22 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Speech recognition isn't reachable", events[-1]['error'])
         self.assertEqual(self.sent, [])
 
+    async def test_speaker_volume_is_read_on_connect_for_home_assistant(self):
+        updates = []
+
+        class FakeHub:
+            def update(self, **changes): updates.append(changes)
+        self.session.hub, self.session.volume_probe_delay = FakeHub(), 0
+        self.task = asyncio.create_task(self.session.run())
+        events = await self.until('media_volume')
+        self.assertEqual((events[-1]['change'], events[-1]['level']), ('get', None))
+        await self.socket.incoming.put(json.dumps({'type': 'media_volume_state', 'level': 0.6}))
+        for _ in range(50):
+            if {'speaker_volume': 0.6} in updates:
+                break
+            await asyncio.sleep(0.01)
+        self.assertIn({'speaker_volume': 0.6}, updates)
+
     async def test_status_changes_reach_home_assistant(self):
         updates = []
 

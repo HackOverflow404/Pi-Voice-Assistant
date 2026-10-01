@@ -630,6 +630,16 @@ class Session:
         if self.hub:
             self.hub.update(voice_volume=level)
 
+    volume_probe_delay = 2  # seconds after connecting before asking the Echo its volume
+
+    async def report_speaker_volume(self):
+        """Ask the Echo for its held media volume once connected, so Home Assistant's slider
+        is right from the start; the app otherwise reports the level only when it changes.
+        A request with no level answers without changing it."""
+        await asyncio.sleep(self.volume_probe_delay)
+        with suppress(Exception):
+            await self.media_volume('get')
+
     async def media_volume(self, change, level=None):
         """The Echo app owns the media volume (it pins it against Bluetooth sources), so ask
         it to move its pinned level; it answers with the level actually applied."""
@@ -694,6 +704,7 @@ class Session:
         receiver = asyncio.create_task(self.receive())
         processor = asyncio.create_task(self.process())
         telemetry = asyncio.create_task(self.telemetry())
+        probe = asyncio.create_task(self.report_speaker_volume()) if self.hub else None
         try:
             done, _ = await asyncio.wait([receiver, processor], return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -707,6 +718,8 @@ class Session:
             receiver.cancel()
             processor.cancel()
             telemetry.cancel()
+            if probe:
+                probe.cancel()
             await asyncio.gather(receiver, processor, telemetry, return_exceptions=True)
 
 
