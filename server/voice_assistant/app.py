@@ -73,6 +73,10 @@ def load_config(path):
     echo.setdefault('pairing_seconds', 120)
     if not 10 <= echo['pairing_seconds'] <= 600:
         raise ValueError('echo.pairing_seconds must be between 10 and 600')
+    mqtt = c.setdefault('mqtt', {}) or {}
+    c['mqtt'] = mqtt
+    mqtt.setdefault('host', '')
+    mqtt.setdefault('port', 1883)
     lamp = c.setdefault('lamp', {}) or {}
     c['lamp'] = lamp
     lamp.setdefault('command', [])
@@ -174,10 +178,11 @@ def system_stats():
 
 class Session:
     def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
-                 clock=None, weather=None, lamp=None):
+                 clock=None, weather=None, lamp=None, hub=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
         self.lamp = lamp  # controls.Lamp, or None when lamp.command isn't configured
+        self.hub = hub  # hass.Hub (Clippy in Home Assistant), or None when mqtt.host isn't set
         self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         self.messenger = WhatsApp(config['whatsapp'])
@@ -202,6 +207,8 @@ class Session:
 
     async def set_status(self, status, error=None):
         self.status, self.error = status, error
+        if self.hub:
+            self.hub.update(status=status, transcript=self.transcript, reply=self.reply, error=error)
         await self.event(type='status', status=status, last_transcript=self.transcript,
                          last_reply=self.reply, message_id=self.message_id, error=error,
                          speech_volume=self.config.get('tts', {}).get('speech_volume', 1.0),
@@ -406,7 +413,12 @@ class Session:
             pcm, capture = capture.pcm, None
             try:
                 await self.set_status('transcribing')
-                self.transcript = await self.blocking(self.transcribe, pcm) if pcm else ''
+                try:
+                    self.transcript = await self.blocking(self.transcribe, pcm) if pcm else ''
+                except Exception as exc:
+                    LOG.warning('Transcription failed: %s', exc)
+                    await self.set_status('idle', "Speech recognition isn't reachable; check the internet connection")
+                    continue
                 if not self.transcript:
                     await self.set_status('idle', 'No speech recognized; say the wake phrase again')
                     continue
@@ -615,6 +627,8 @@ class Session:
     def set_speech_volume(self, level):
         self.levels.speech_volume = level
         self.config['tts']['speech_volume'] = level  # read for every reply and chime
+        if self.hub:
+            self.hub.update(voice_volume=level)
 
     async def media_volume(self, change, level=None):
         """The Echo app owns the media volume (it pins it against Bluetooth sources), so ask
@@ -622,9 +636,12 @@ class Session:
         self.volume_reply = asyncio.get_running_loop().create_future()
         await self.event(type='media_volume', change=change, level=level, step=controls.STEP)
         try:
-            return await asyncio.wait_for(self.volume_reply, 5)
+            applied = await asyncio.wait_for(self.volume_reply, 5)
         finally:
             self.volume_reply = None
+        if self.hub:
+            self.hub.update(speaker_volume=applied)
+        return applied
 
     async def retract(self):
         """Delete the cancelled request from the chat for everyone, and stop waiting."""
@@ -704,6 +721,15 @@ async def serve(config, engines):
     echo = controls.Echo(config['echo'])
     jev = controls.Jev(config['jev']) if config['jev'].get('api_key') else None
     lamp = controls.Lamp(config['lamp']) if config['lamp']['command'] else None
+    hub = None
+    if config['mqtt']['host']:
+        from .hass import Hub
+
+        def set_voice_volume(level):  # from Home Assistant, with or without the Echo connected
+            levels.speech_volume = level
+            config['tts']['speech_volume'] = level
+            hub.update(voice_volume=level)
+        hub = Hub(config['mqtt'], asyncio.get_running_loop(), levels.speech_volume, set_voice_volume)
     clock, weather = skills.Clock(state), skills.Weather()
 
     async def ticker():  # finished timers start ringing, even with no Echo connected
@@ -747,8 +773,13 @@ async def serve(config, engines):
                 await asyncio.wait_for(old_done.wait(), 10)
         done = asyncio.Event()
         current = (ws, done)
+        session = None
         try:
-            await Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather, lamp=lamp).run()
+            session = Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather,
+                              lamp=lamp, hub=hub)
+            if hub:
+                hub.attach(session)
+            await session.run()
         except ConnectionClosed:
             pass
         except Exception:
@@ -756,6 +787,8 @@ async def serve(config, engines):
         finally:
             LOG.info('Microphone connection ended: code %s %s', ws.close_code, ws.close_reason or '')
             done.set()
+            if hub and session:
+                hub.detach(session)
             if current and current[0] is ws:
                 current = None
 
@@ -774,6 +807,8 @@ async def serve(config, engines):
         await shutdown.wait()
     if refresher:
         refresher.cancel()
+    if hub:
+        hub.close()
     store.db.close()
 
 

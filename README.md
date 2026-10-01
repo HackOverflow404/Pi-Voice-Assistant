@@ -290,14 +290,25 @@ utterance is for Instinct, a device command, a cancellation, or an accidental tr
 device command, which one. Answers below `jev.min_probability`, a device "set" without a spoken
 level, and any Jev error or timeout all fall back to sending the request to Instinct.
 
+## Home Assistant
+
+With `mqtt.host` set (the Mosquitto broker Home Assistant uses), the server publishes a
+**Clippy** device through MQTT discovery: its status (idle, listening, speaking…, or
+offline when no Echo is connected), the last request and reply (full text in the
+attributes), whether the Echo is connected, and voice and speaker volume sliders plus
+start/stop pairing buttons. The voice volume works with the Echo disconnected; speaker
+volume and pairing need it connected. Changes made by voice update the sliders too.
+
 ## Speech services and volume
 
 `stt.engine` and `tts.engine` choose local models (Whisper tiny.en, Piper) or Deepgram
 (Nova-3 recognition, Aura-2 voices, key in `tts.deepgram_api_key`). Deepgram recognition
 takes under a second instead of about five, and its voices sound far more natural: local
 voices of similar quality run 5-13x slower than real time on a Pi 4. Deepgram receives
-only the recording made after the wake word, and the reply text. If a Deepgram request
-fails, that request or sentence falls back to the local model.
+only the recording made after the wake word, and the reply text. A failed Deepgram voice
+falls back to Piper for that sentence. Recognition has no local fallback when Deepgram is
+selected: Whisper isn't loaded at all (about 130 MB saved), and a failed transcription is
+reported on the dashboard instead.
 
 While the voice service runs, the Echo holds its media volume at a set level (maximum unless
 changed by voice) and restores it whenever something else changes it, so Bluetooth sources (which scale their own audio) get the

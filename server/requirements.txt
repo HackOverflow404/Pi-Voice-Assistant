@@ -7,3 +7,4 @@ websockets==15.0.1
 PyYAML==6.0.2
 icalendar==7.3.0
 recurring-ical-events==3.8.2
+paho-mqtt==2.1.0

@@ -9,17 +9,20 @@ class Engines:
     def __init__(self, config, tts=None, stt=None):
         import numpy as np
         from openwakeword.model import Model as WakeModel
-        from faster_whisper import WhisperModel
         from piper import PiperVoice
         self.np = np
         self.wake = WakeModel(wakeword_models=[config['wake']], inference_framework='onnx')
+        tts, stt = tts or {}, stt or {}
         # Whisper tiny.en transcribed the Echo's quiet, reverberant recordings correctly where
-        # Vosk small did not, without inventing text from silence (unlike base.en), and fits
-        # the Pi's memory.
-        self.whisper = WhisperModel(config['whisper'], device='cpu', compute_type='int8', cpu_threads=4)
+        # Vosk small did not, without inventing text from silence (unlike base.en). It is
+        # loaded only when it is the recognizer: with Deepgram there is no local fallback, so
+        # its memory stays free for the rest of the Pi.
+        self.whisper = None
+        if stt.get('engine', 'whisper') == 'whisper':
+            from faster_whisper import WhisperModel
+            self.whisper = WhisperModel(config['whisper'], device='cpu', compute_type='int8', cpu_threads=4)
         self.piper = PiperVoice.load(config['piper'])  # also the fallback when the cloud voice fails
         self.cloud = self.cloud_stt = None
-        tts, stt = tts or {}, stt or {}
         if tts.get('engine') == 'deepgram':
             from .deepgram import DeepgramVoice
             self.cloud = DeepgramVoice(tts['deepgram_api_key'], tts['deepgram_voice'], tts.get('deepgram_speed', 1.0))
@@ -37,7 +40,9 @@ class Engines:
         if self.cloud_stt:
             try:
                 return self.cloud_stt.transcribe(pcm)
-            except Exception as exc:  # no internet, bad key, quota: transcribe locally instead
+            except Exception as exc:  # no internet, bad key, quota
+                if not self.whisper:
+                    raise RuntimeError(f'Speech recognition failed: {exc}') from exc
                 LOG.warning('Cloud transcription failed (%s); using Whisper', exc)
         audio = self.np.frombuffer(pcm, dtype='<i2').astype(self.np.float32) / 32768
         segments, _ = self.whisper.transcribe(audio, language='en', beam_size=1, vad_filter=False,

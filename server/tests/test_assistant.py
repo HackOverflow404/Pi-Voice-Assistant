@@ -363,6 +363,14 @@ class VoiceTests(unittest.TestCase):
         data, duration = engines.synthesize('Hello')
         self.assertAlmostEqual(duration, 0.08)
 
+    def test_cloud_transcription_failure_without_whisper_is_an_error(self):
+        class Broken:
+            def transcribe(self, pcm): raise RuntimeError('offline')
+        engines = Engines.__new__(Engines)
+        engines.cloud_stt, engines.whisper = Broken(), None
+        with self.assertRaisesRegex(RuntimeError, 'Speech recognition failed'):
+            engines.transcribe(SPEECH)
+
 
 class FakeSocket:
     def __init__(self):
@@ -477,6 +485,37 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': start['id']}))
         await self.until('idle')
         self.assertEqual(self.sent, [])
+
+    async def test_transcription_failure_is_reported_not_sent(self):
+        def fail(pcm): raise RuntimeError('Speech recognition failed: offline')
+        self.session.engines.transcribe = fail
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await self.socket.incoming.put(SPEECH)
+        await self.until('listening')
+        await self.socket.incoming.put(SPEECH + SILENCE * 2)
+        await self.until('transcribing')
+        events = await self.until('idle')
+        self.assertIn("Speech recognition isn't reachable", events[-1]['error'])
+        self.assertEqual(self.sent, [])
+
+    async def test_status_changes_reach_home_assistant(self):
+        updates = []
+
+        class FakeHub:
+            def update(self, **changes): updates.append(changes)
+        self.session.hub = FakeHub()
+        self.config['tts'] = {'speech_volume': 0.3}
+        self.session.levels = Levels(self.temp.name, 0.3)
+        await self.say('Turn up your volume.')
+        start = next(e for e in await self.until('audio_start') if isinstance(e, dict) and e.get('type') == 'audio_start')
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': start['id']}))
+        await self.until('idle')
+        statuses = [u['status'] for u in updates if 'status' in u]
+        self.assertIn('listening', statuses)
+        self.assertEqual(statuses[-1], 'idle')
+        self.assertIn({'voice_volume': 0.4}, updates)
+        self.assertTrue(any(u.get('transcript') == 'Turn up your volume.' for u in updates))
 
     async def test_lamp_command_is_handled_locally(self):
         pressed = []
