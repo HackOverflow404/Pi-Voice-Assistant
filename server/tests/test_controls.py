@@ -54,11 +54,13 @@ def answer(choice, probability, options):
 
 
 class FakeJev(Jev):
-    def __init__(self, route, route_p, action='none', action_p=0.9):
+    def __init__(self, route, route_p, action='none', action_p=0.9, addressed=None, addressed_p=0.9):
         super().__init__({'api_key': 'test'})
         self.response = {'model': 'jev-latest', 'answers': {
             'route': answer(route, route_p, controls.ROUTES),
             'device_action': answer(action, action_p, controls.DEVICE_ACTIONS)}}
+        if addressed:  # left out unless a test sets it, so route-only tests see the old behaviour
+            self.response['answers']['addressed'] = answer(addressed, addressed_p, controls.ADDRESSED)
         self.sent = None
 
     def call(self, text):
@@ -70,9 +72,30 @@ class JevTests(unittest.TestCase):
     def test_request_asks_both_questions_in_one_call(self):
         jev = FakeJev('instinct', 0.9)
         jev.decide('what is on my calendar')
-        self.assertEqual(set(jev.sent['questions']), {'route', 'device_action'})
+        self.assertEqual(set(jev.sent['questions']), {'addressed', 'route', 'device_action'})
         self.assertEqual(jev.sent['state']['transcript'], 'what is on my calendar')
         self.assertTrue(all(q['type'] == 'choice' for q in jev.sent['questions'].values()))
+
+    def test_not_addressed_is_discarded_whatever_the_route(self):
+        # A remark like "ugh, I'm so tired" that the route alone might send on as a message.
+        self.assertEqual(FakeJev('instinct', 0.9, addressed='no', addressed_p=0.8).decide('x')[0], 'accidental')
+        self.assertEqual(FakeJev('device', 0.9, 'weather_query', addressed='no', addressed_p=0.8)
+                         .decide("it's freezing in here")[0], 'accidental')
+        # Unsure whether it was meant: the route decides, as before.
+        self.assertEqual(FakeJev('instinct', 0.9, addressed='no', addressed_p=0.5).decide('x')[0], 'instinct')
+        # A cancellation still reads as a cancellation.
+        self.assertEqual(FakeJev('cancel', 0.9, addressed='no', addressed_p=0.9).decide('x')[0], 'cancel')
+
+    def test_confidently_addressed_overrides_an_accidental_route(self):
+        # "text mom I'm running late": the content reads like a remark, the instruction doesn't.
+        self.assertEqual(FakeJev('accidental', 0.95, addressed='yes', addressed_p=0.83)
+                         .decide("text mom I'm running late")[0], 'instinct')
+        # Unsure it was meant ("grab me a water while you're up"): the accidental route stands.
+        self.assertEqual(FakeJev('accidental', 0.8, addressed='yes', addressed_p=0.51).decide('x')[0], 'accidental')
+
+    def test_answer_without_addressed_still_works(self):
+        self.assertEqual(FakeJev('instinct', 0.9).decide('x')[0], 'instinct')
+        self.assertEqual(FakeJev('accidental', 0.8).decide('x')[0], 'accidental')
 
     def test_routes(self):
         self.assertEqual(FakeJev('instinct', 0.9).decide('x')[0], 'instinct')

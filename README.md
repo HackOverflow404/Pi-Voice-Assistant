@@ -285,10 +285,16 @@ request"), or a request ending in one ("what's the weather, actually never mind"
 So is a transcript that is just Whisper's text for non-speech ("Thank you.", "[Music]").
 
 With `jev.api_key` set, whatever the phrases above don't match goes to
-[Jev](https://docs.typesafe.ai/), TypeSafe's decision model. One request asks it both whether the
-utterance is for Instinct, a device command, a cancellation, or an accidental trigger, and, for a
-device command, which one. Answers below `jev.min_probability`, a device "set" without a spoken
-level, and any Jev error or timeout all fall back to sending the request to Instinct.
+[Jev](https://docs.typesafe.ai/), TypeSafe's decision model. One request asks it three things in
+a single pass: whether the utterance was said to the assistant on purpose at all, whether it is for
+Instinct, a device command, a cancellation, or an accidental trigger, and, for a device command,
+which one. The first question is what catches false triggers: remarks, thinking out loud, talking
+to someone else or about Clippy, rhetorical questions and TV dialogue are confidently "not meant"
+and discarded even when they could be read as a message. An instruction to text, tell, send, note
+or remind counts as meant whatever its content, and a confident "meant" stops the route from
+discarding it ("text mom I'm running late"). Answers below `jev.min_probability`, a device "set"
+without a spoken level, and any Jev error or timeout all fall back to sending the request to
+Instinct.
 
 ## Home Assistant
 

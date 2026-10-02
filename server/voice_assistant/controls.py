@@ -209,11 +209,37 @@ def parse(text):
 
 # ---------------------------------------------------------------- Jev (fallback router)
 
+CONTEXT = ('Speech-to-text of what a microphone on an Echo Show speaker picked up just after it heard '
+           'something like its wake word "Hey Clippy". The microphone hears the whole room, and the wake '
+           'word sometimes fires by mistake on similar-sounding speech, TV or music, so the transcript may '
+           'be words that were never meant for the assistant at all.')
+
+# Asked alongside the route: a confident "no" discards the transcript whatever the route says, so
+# a remark or overheard sentence is never sent on just because it could be read as a message.
+INSTRUCTION_VERBS = ('text, message, email, call, tell, let someone know, send, remind, note, remember, add '
+                     'or schedule')
+ADDRESSED = {
+    'yes': 'Said to the assistant on purpose, expecting it to respond or act: a question for it, or an '
+           'instruction or request to it. Anything that starts by asking it to ' + INSTRUCTION_VERBS +
+           ' is meant for it, whatever the rest says, because the rest is the content to send or keep: '
+           '"text mom I\'m running late", "text dad happy birthday", "note that my exam is on Friday" '
+           'and "tell Instinct I finished the assignment" are all meant for the assistant.',
+    'no': 'Not meant for the assistant as a command, question or message: a remark, reaction or '
+          'exclamation ("ugh, I\'m so tired", "that was amazing"); thinking out loud or a question to '
+          'oneself ("where did I put my keys"); a rhetorical question; talking to another person in the '
+          'room or on a call; talking about the assistant rather than to it ("Clippy never hears me"); '
+          'narrating or retelling what someone said; reading text aloud, singing or quoting; dialogue '
+          'from a TV, video, game or song; or a fragment, filler or noise. A statement with no '
+          'instruction to the assistant ("I\'m running late again") is not meant for it.',
+}
 ROUTES = {
-    'instinct': 'A genuine request, question or message meant for the voice assistant that the '
-                'speaker cannot answer by itself: knowledge, assignments, email, reminders, messages, '
-                'and advanced math (algebra, calculus, statistics, proofs, unit conversions, word problems).',
-    'device': 'Something this speaker does itself: Bluetooth pairing mode or volume; the desk lamp (on or '
+    'instinct': 'A question, request or message spoken to the voice assistant on purpose, that the '
+                'speaker cannot handle by itself: knowledge, assignments, email, reminders, notes, messages '
+                'to send, and advanced math (algebra, calculus, statistics, proofs, unit conversions, word '
+                'problems). An instruction to ' + INSTRUCTION_VERBS + ' something belongs here even when '
+                'what follows is a plain statement, such as "text dad happy birthday".',
+    'device': 'Something this speaker does itself, asked for or instructed rather than merely mentioned: '
+              'Bluetooth pairing mode or volume; the desk lamp (on or '
               'off, brighter, dimmer, warmer, cooler, a one-hour timer, or presets like sun, night, milk, '
               'reading and laptop); setting, pausing, '
               'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
@@ -221,8 +247,10 @@ ROUTES = {
               'user\'s calendar events. Not advanced math, assignments, email or general knowledge.',
     'cancel': 'The speaker is cancelling or retracting their request, for example "never mind", '
               '"ignore that", "actually cancel" or "forget it".',
-    'accidental': 'Not addressed to the assistant: background TV or conversation, a fragment, filler '
-                  'sounds, or speech-recognition noise.',
+    'accidental': 'Not meant for the assistant: a remark or reaction, thinking out loud, talking to '
+                  'someone else or about the assistant, background TV, video or music, a fragment, filler '
+                  'sounds, or speech-recognition noise. Never an instruction to the assistant to ' +
+                  INSTRUCTION_VERBS + ' something.',
 }
 DEVICE_ACTIONS = {
     'pairing_on': 'Start Bluetooth pairing mode so a new device can connect.',
@@ -265,10 +293,12 @@ class Jev:
 
     def request(self, text):
         return {'model': self.model,
-                'state': {'transcript': text,
-                          'context': 'Speech-to-text of what someone said to a voice assistant on an '
-                                     'Echo Show speaker, just after its wake word "Hey Clippy".'},
+                'state': {'transcript': text, 'context': CONTEXT},
                 'questions': {
+                    'addressed': {'type': 'choice',
+                                  'instructions': 'Was this said to the assistant on purpose, as a command, '
+                                                  'a question for it, or a message for it to handle?',
+                                  'criteria': ADDRESSED},
                     'route': {'type': 'choice', 'instructions': 'What should happen with this transcript?',
                               'criteria': ROUTES},
                     'device_action': {'type': 'choice',
@@ -286,13 +316,23 @@ class Jev:
             raise RuntimeError(f'Jev {exc.code}: {detail}') from exc
 
     def decide(self, text):
-        """('instinct' | 'cancel' | 'accidental' | Command, route probability). Anything unsure
-        or incomplete falls back to Instinct, which is what happened before Jev."""
+        """('instinct' | 'cancel' | 'accidental' | Command, route probability). The "addressed"
+        answer settles whether it was meant for the assistant at all: a confident no discards it, and
+        a confident yes stops an "accidental" route from discarding a real instruction such as "text
+        mom I'm running late". Anything else unsure or incomplete falls back to Instinct, which is
+        what happened before Jev."""
         answers = self.call(text)['answers']
         route = answers['route']
         probability = route['probabilities'].get(route['choice'], 0.0)
+        addressed = answers.get('addressed') or {'choice': None, 'probabilities': {}}
+        meant = addressed['probabilities'].get('yes', 0.0) if addressed['choice'] == 'yes' else 0.0
+        not_meant = addressed['probabilities'].get('no', 0.0) if addressed['choice'] == 'no' else 0.0
+        if not_meant >= self.min_probability and route['choice'] != 'cancel':
+            return 'accidental', not_meant
         if route['choice'] == 'instinct' or probability < self.min_probability:
             return 'instinct', probability
+        if route['choice'] == 'accidental' and meant >= self.min_probability:
+            return 'instinct', meant
         if route['choice'] in ('cancel', 'accidental'):
             return route['choice'], probability
         action = answers['device_action']
