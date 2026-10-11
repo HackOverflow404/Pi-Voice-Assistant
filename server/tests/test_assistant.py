@@ -753,6 +753,32 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.until('speaking')  # the new request, answered on the Pi
         self.assertEqual(self.sent, ['What assignments are due?'])
 
+    async def test_palm_while_speaking_stops_and_goes_idle(self):
+        await self.speak_request()
+        await self.until('speaking')
+        await self.session.gesture('palm')
+        events = await self.until('gesture')
+        self.assertTrue(any(isinstance(e, dict) and e.get('type') == 'stop_audio' for e in events))
+        self.assertEqual(events[-1], {'type': 'gesture', 'gesture': 'palm', 'action': 'stop'})
+        self.assertFalse(self.session.busy())
+        self.assertEqual(self.session.status, 'idle')
+
+    async def test_palm_dismisses_a_ringing_timer_before_anything_else(self):
+        class Clock:
+            dismissed = False
+            def ringing(self): return not self.dismissed
+            def dismiss(self): self.dismissed = True
+        self.session.clock = Clock()
+        await self.session.gesture('palm')
+        self.assertEqual(await self.event(), {'type': 'gesture', 'gesture': 'palm', 'action': 'dismiss'})
+        self.assertTrue(self.session.clock.dismissed)
+        await self.session.gesture('palm')  # nothing ringing or talking: music
+        self.assertEqual((await self.event())['action'], 'toggle')
+        await self.session.gesture('next')
+        self.assertEqual((await self.event())['action'], 'next')
+        await self.session.gesture('wave')  # unknown gestures do nothing
+        self.assertTrue(self.socket.outgoing.empty())
+
     async def test_wake_word_while_waiting_abandons_the_reply_watch(self):
         stopped = threading.Event()
         def waiting(request, since, deadline, stop, on_reaction=None):

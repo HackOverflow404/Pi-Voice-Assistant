@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import unittest
 
 from voice_assistant.controls import Command
@@ -16,7 +17,7 @@ class FakeClient:
 
 def hub(voice_volume=0.3):
     h = Hub.__new__(Hub)  # skip the real MQTT connection
-    h.client, h.session, h.loop = FakeClient(), None, None
+    h.client, h.session, h.loop, h.zone = FakeClient(), None, None, 'unknown'
     h.applied = []
     h.on_voice_volume = h.applied.append
     h.state = {'status': 'offline', 'transcript': '', 'reply': '', 'error': None, 'connected': False,
@@ -75,6 +76,39 @@ class HubTests(unittest.IsolatedAsyncioTestCase):
         last = json.loads(h.client.published[-1][1])
         self.assertEqual((last['connected'], last['status']), (False, 'offline'))
         self.assertTrue(all(retain for _, _, retain in h.client.published))
+
+
+class VisionTests(unittest.IsolatedAsyncioTestCase):
+    """echo-presence's MQTT topics, relayed to the Echo's session."""
+    class Session:
+        def __init__(self): self.events, self.gestures = [], []
+        async def event(self, **payload): self.events.append(payload)
+        async def gesture(self, name): self.gestures.append(name)
+
+    async def test_zone_changes_reach_the_echo_once(self):
+        h, session = hub(), self.Session()
+        h.attach(session)
+        await h.handle('clippy/vision/presence', json.dumps({'zone': 'far'}))
+        await h.handle('clippy/vision/presence', json.dumps({'zone': 'far'}))  # retained repeat
+        await h.handle('clippy/vision/availability', 'offline')
+        self.assertEqual(session.events, [{'type': 'presence', 'zone': 'far'},
+                                          {'type': 'presence', 'zone': 'unknown'}])
+
+    async def test_a_reconnecting_echo_gets_the_current_zone(self):
+        h = hub()
+        await h.handle('clippy/vision/presence', json.dumps({'zone': 'away'}))  # no Echo yet
+        session = self.Session()
+        h.attach(session)
+        await asyncio.sleep(0)
+        self.assertEqual(session.events, [{'type': 'presence', 'zone': 'away'}])
+
+    async def test_fresh_gestures_only(self):
+        h, session = hub(), self.Session()
+        await h.handle('clippy/vision/gesture', json.dumps({'gesture': 'palm', 'at': time.time()}))  # no Echo
+        h.attach(session)
+        await h.handle('clippy/vision/gesture', json.dumps({'gesture': 'next', 'at': time.time()}))
+        await h.handle('clippy/vision/gesture', json.dumps({'gesture': 'palm', 'at': time.time() - 10}))
+        self.assertEqual(session.gestures, ['next'])
 
 
 if __name__ == '__main__':

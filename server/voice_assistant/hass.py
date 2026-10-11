@@ -5,11 +5,15 @@ connected, the voice and speaker volumes) and takes a few commands from Home Ass
 set either volume, start or stop Bluetooth pairing. MQTT runs in paho's own thread;
 commands are handed to the server's event loop, where the session lives.
 
+Also relays the camera service (echo-presence) to the Echo: how close someone is
+(`clippy/vision/presence`, retained) and hand gestures (`clippy/vision/gesture`).
+
 Optional: enabled by `mqtt.host` in config.yaml.
 """
 import asyncio
 import json
 import logging
+import time
 
 LOG = logging.getLogger('voice')
 DISCOVERY = 'homeassistant'
@@ -18,6 +22,8 @@ STATE = f'{BASE}/state'
 AVAILABILITY = f'{BASE}/availability'
 DEVICE = {'identifiers': ['clippy'], 'name': 'Clippy', 'manufacturer': 'Amazon (LineageOS)',
           'model': 'Echo Show 5', 'via_device': 'mainframe'}
+VISION = f'{BASE}/vision'
+GESTURE_MAX_AGE = 3  # seconds; an older gesture (a backlog after a stall) is dropped, not acted on
 TEXT_LIMIT = 250  # HA states max out at 255 characters; full text is in the attributes
 
 
@@ -53,6 +59,7 @@ class Hub:
     def __init__(self, config, loop, voice_volume, on_voice_volume):
         import paho.mqtt.client as mqtt
         self.loop, self.on_voice_volume, self.session = loop, on_voice_volume, None
+        self.zone = 'unknown'  # from echo-presence; 'unknown' while it is offline
         self.state = {'status': 'offline', 'transcript': '', 'reply': '', 'error': None, 'connected': False,
                       'voice_volume': voice_volume, 'speaker_volume': None}
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='clippy-voice-assistant')
@@ -71,7 +78,8 @@ class Hub:
                       'device': DEVICE}
             client.publish(f'{DISCOVERY}/{component}/{uid}/config', json.dumps(config), retain=True)
         client.publish(AVAILABILITY, 'online', retain=True)
-        client.subscribe([(f'{BASE}/voice_volume/set', 0), (f'{BASE}/speaker_volume/set', 0), (f'{BASE}/command', 0)])
+        client.subscribe([(f'{BASE}/voice_volume/set', 0), (f'{BASE}/speaker_volume/set', 0), (f'{BASE}/command', 0),
+                          (f'{VISION}/presence', 0), (f'{VISION}/gesture', 0), (f'{VISION}/availability', 0)])
         self._publish()
         LOG.info('Home Assistant: Clippy published over MQTT')
 
@@ -81,7 +89,9 @@ class Hub:
 
     async def handle(self, topic, payload):
         try:
-            if topic.endswith('voice_volume/set'):
+            if topic.startswith(VISION + '/'):
+                await self.vision(topic[len(VISION) + 1:], payload)
+            elif topic.endswith('voice_volume/set'):
                 self.on_voice_volume(min(1.0, max(0.05, float(payload) / 100)))
             elif topic.endswith('speaker_volume/set'):
                 if not self.session:
@@ -95,9 +105,28 @@ class Hub:
         except Exception as exc:
             LOG.warning('Home Assistant command %s %s failed: %s', topic, payload, exc)
 
+    async def vision(self, kind, payload):
+        if kind == 'gesture':
+            event = json.loads(payload)
+            if self.session and time.time() - event.get('at', 0) <= GESTURE_MAX_AGE:
+                await self.session.gesture(event['gesture'])
+            return
+        if kind == 'presence':
+            zone = json.loads(payload).get('zone', 'unknown')
+        elif kind == 'availability' and payload != 'online':
+            zone = 'unknown'  # the camera service stopped: show the full dashboard, change nothing
+        else:
+            return
+        if zone != self.zone:
+            self.zone = zone
+            if self.session:
+                await self.session.event(type='presence', zone=zone)
+
     def attach(self, session):
         self.session = session
         self.update(connected=True)
+        if self.zone != 'unknown':  # a reconnecting Echo starts in the right layout
+            asyncio.ensure_future(session.event(type='presence', zone=self.zone))
 
     def detach(self, session):
         if self.session is session:

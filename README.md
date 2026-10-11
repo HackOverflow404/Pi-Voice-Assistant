@@ -460,6 +460,11 @@ adb uninstall com.instinct.voice
   or timeout. Mic audio streams in every state and wake detection never pauses. A wake
   word while busy cancels the job on the Pi and sends `{"type":"stop_audio"}` (after any
   segment already in transfer); Android stops the sentence playing and skips queued ones.
+- Presence and gestures (from echo-presence over MQTT, relayed by `hass.py`):
+  `{"type":"presence","zone":"near|far|away|unknown"}`, and
+  `{"type":"gesture","gesture":"palm|next|previous","action":"toggle|next|previous|stop|dismiss"}`.
+  The Pi handles `stop` (interrupts Clippy) and `dismiss` (ringing timers) itself; the Echo
+  sends the media keys for the rest, since it knows what is playing, and shows a short pill.
 - Connection failures retry with 1–30 second backoff. Queues and utterance size
   are bounded. Mic streams that stop for 15 seconds are disconnected.
 - `state/requests.sqlite3` records a request ID, transcript, reply, creation time,

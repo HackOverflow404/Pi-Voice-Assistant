@@ -481,6 +481,27 @@ class Session:
         async with self.audio_lock:  # after any segment already in transfer
             await self.event(type='stop_audio')
 
+    async def gesture(self, name):
+        """A hand gesture from the camera service (echo-presence, over MQTT). An open palm stops
+        what is most in the way: a ringing timer, then Clippy talking or about to send, and
+        otherwise plays or pauses music. Swipes skip tracks. The Echo does the media part, since
+        it knows what is playing, and shows what happened."""
+        action = name if name in ('next', 'previous') else None
+        if name == 'palm':
+            if self.clock and self.clock.ringing():
+                self.clock.dismiss()
+                action = 'dismiss'
+            elif self.busy() and self.status in ('transcribing', 'confirming', 'speaking'):
+                # 'waiting' is left alone: the request has been sent, and a palm shouldn't unsend it.
+                await self.interrupt()
+                await self.set_status('idle', 'Stopped')
+                action = 'stop'
+            else:
+                action = 'toggle'
+        if action:
+            LOG.info('Gesture %s: %s', name, action)
+            await self.event(type='gesture', gesture=name, action=action)
+
     async def read_message(self, text):
         """Read aloud a text the contact sent on its own, not as the reply to a request."""
         LOG.info('Reading an incoming text aloud')
