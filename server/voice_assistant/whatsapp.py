@@ -30,6 +30,13 @@ class WhatsApp:
         body = f'{text}\n\n{instruction}' if instruction else text
         return self.call('POST', '/send', {'contact': self.config['contact'], 'text': body}, timeout=30)
 
+    can_unsend = True
+
+    def unread(self):
+        """Only replies to requests are read out over WhatsApp: the chat also carries
+        unrelated conversation (see repliesTo in bridge/main.go)."""
+        return None
+
     def revoke(self, message_id):
         """Delete a sent request for everyone (the user cancelled it)."""
         self.call('POST', '/revoke', {'contact': self.config['contact'], 'id': message_id}, timeout=30)

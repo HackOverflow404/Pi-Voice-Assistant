@@ -19,6 +19,7 @@ from . import agenda, controls, skills
 from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_transcript, normalize, rms,
                     speech_threshold, wake_is_plausible)
 from .speech import chunks, speakable
+from .sms import GoogleVoice
 from .store import Store
 from .whatsapp import WhatsApp
 
@@ -42,13 +43,28 @@ def load_config(path):
             0 < a['silence_seconds'] < a['max_utterance_seconds'] <= 60 and
             0 < a['start_timeout_seconds'] <= a['max_utterance_seconds']):
         raise ValueError('Invalid audio thresholds or durations')
-    w = c['whatsapp']
+    # The chat requests go to: sms (Google Voice through Gmail) or whatsapp (bridge/).
+    messenger = c.setdefault('messenger', 'whatsapp')
+    if messenger not in ('sms', 'whatsapp') or not isinstance(c.get(messenger), dict):
+        raise ValueError('messenger must be sms or whatsapp, with a section of that name')
+    w = c[messenger]
     w.setdefault('instruction', '')
     w.setdefault('send_delay_seconds', 3)
     w.setdefault('reaction_phrases', {'👀': 'Looking into it.', '👍': 'On it.'})
-    if not (w.get('contact') and w.get('bridge_url') and 1 <= w['reply_timeout_seconds'] <= 3600 and
+    if not (w.get('contact') and 1 <= w['reply_timeout_seconds'] <= 3600 and
             1 <= w['max_reply_chars'] <= 10000 and 0 <= w['reply_settle_seconds'] <= 30):
-        raise ValueError('Invalid whatsapp contact, bridge URL, timeouts or reply length')
+        raise ValueError(f'Invalid {messenger} contact, timeouts or reply length')
+    if messenger == 'whatsapp' and not w.get('bridge_url'):
+        raise ValueError('Set whatsapp.bridge_url')
+    if messenger == 'sms':
+        for key, value in dict(imap_host='imap.gmail.com', smtp_host='smtp.gmail.com', mailbox='INBOX',
+                               poll_seconds=3, stale_minutes=60, reply_address='').items():
+            w.setdefault(key, value)
+        password = w.get('app_password') or ''
+        if not w.get('gmail_address') or not password or password.startswith('REPLACE'):
+            raise ValueError('Set sms.gmail_address and sms.app_password (a Gmail app password)')
+        if not (1 <= w['poll_seconds'] <= 60 and 1 <= w['stale_minutes'] <= 1440):
+            raise ValueError('sms.poll_seconds must be 1-60 and sms.stale_minutes 1-1440')
     tts = c.setdefault('tts', {}) or {}
     c['tts'] = tts
     tts.setdefault('engine', 'piper')
@@ -178,14 +194,19 @@ def system_stats():
 
 class Session:
     def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
-                 clock=None, weather=None, lamp=None, hub=None):
+                 clock=None, weather=None, lamp=None, hub=None, messenger=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
         self.lamp = lamp  # controls.Lamp, or None when lamp.command isn't configured
         self.hub = hub  # hass.Hub (Clippy in Home Assistant), or None when mqtt.host isn't set
         self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
-        self.messenger = WhatsApp(config['whatsapp'])
+        # The active chat's settings and client; the SMS client is shared by all sessions,
+        # since it watches the inbox even while no Echo is connected.
+        self.chat = config[config.get('messenger', 'whatsapp')]
+        self.messenger = messenger or WhatsApp(self.chat)
+        self.job = None  # the request or incoming text being handled; a wake word cancels it
+        self.dropped = 0  # microphone frames dropped while the Pi was too busy
         self.queue = asyncio.Queue(maxsize=25)  # 2 seconds maximum backlog
         self.stop = threading.Event()
         self.played = asyncio.Event()
@@ -197,8 +218,10 @@ class Session:
         self.error = None
         self.audio_lock = asyncio.Lock()  # one WAV transfer at a time: replies and announcements
         self.phrases = {}  # cached announcement audio
-        self.cancel = asyncio.Event()  # the Echo's Cancel tap, before sending
-        self.abort = threading.Event()  # the same tap while waiting for the reply
+        # The Echo's Cancel tap, before sending and while waiting for the reply. Each job gets
+        # its own, so an interrupted job's reply watch can't outlive it and take the next reply.
+        self.cancel = asyncio.Event()
+        self.abort = threading.Event()
         self.volume_reply = None  # the Echo's answer to a media volume change
         self.pairing_timer = None
 
@@ -212,23 +235,19 @@ class Session:
         await self.event(type='status', status=status, last_transcript=self.transcript,
                          last_reply=self.reply, message_id=self.message_id, error=error,
                          speech_volume=self.config.get('tts', {}).get('speech_volume', 1.0),
-                         send_delay=self.config.get('whatsapp', {}).get('send_delay_seconds', 0))
+                         send_delay=self.chat.get('send_delay_seconds', 0))
 
     async def blocking(self, function, *args):
         # Do not release the shared engines to another session while a native call is running.
         task = asyncio.create_task(asyncio.to_thread(function, *args))
+        abort = self.abort
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            self.stop.set()
+            abort.set()  # end a reply wait; session shutdown also sets self.stop
             with suppress(Exception):
                 await task
             raise
-
-    def flush(self):
-        while not self.queue.empty():
-            self.queue.get_nowait()
-        self.engines.reset()
 
     async def receive(self):
         framer = Framer()
@@ -237,15 +256,16 @@ class Session:
                 if len(data) % 2:
                     await self.ws.close(1003, 'PCM must contain complete int16 samples')
                     return
-                if self.status not in ('idle', 'listening'):
-                    framer = Framer()
-                    continue
+                # Audio is processed in every state, so the wake word can interrupt anything.
                 for frame in framer.feed(data):
-                    try:
-                        self.queue.put_nowait(frame)
-                    except asyncio.QueueFull:
-                        await self.ws.close(1013, 'Audio processing cannot keep up')
-                        return
+                    if self.queue.full():
+                        # The Pi is too busy (e.g. transcribing): drop the oldest audio rather
+                        # than fall behind.
+                        self.queue.get_nowait()
+                        self.dropped += 1
+                        if self.dropped % 50 == 1:
+                            LOG.warning('Processing behind: dropped %d microphone frames', self.dropped)
+                    self.queue.put_nowait(frame)
             else:
                 try:
                     event = json.loads(data)
@@ -277,18 +297,23 @@ class Session:
         parts = chunks(text) or ['I got an empty reply.']
         started, total = time.monotonic(), 0.0
         for seq, part in enumerate(parts):
-            async with self.audio_lock:
-                wav, duration = await self.blocking(self.engines.synthesize, part)
-                if seq == 0:
-                    LOG.info('First of %d speech segments ready after %.1f s', len(parts), time.monotonic() - started)
-                total += duration
-                await self.send_wav(self.playback_id, seq, seq == len(parts) - 1, wav, duration)
+            wav, duration = await self.blocking(self.engines.synthesize, part)
+            if seq == 0:
+                LOG.info('First of %d speech segments ready after %.1f s', len(parts), time.monotonic() - started)
+            total += duration
+            # Shielded: a wake word stops the reply between segments, never mid-transfer.
+            await asyncio.shield(asyncio.create_task(
+                self.transfer(self.playback_id, seq, seq == len(parts) - 1, wav, duration)))
         await asyncio.wait_for(self.played.wait(), timeout=total + 30)
         if self.playback_error:
             raise RuntimeError('Client could not play the reply')
         self.playback_id = None
         if audio_id is None:
             self.store.update(self.message_id, 'done')
+
+    async def transfer(self, *args):
+        async with self.audio_lock:
+            await self.send_wav(*args)
 
     async def send_wav(self, audio_id, seq, last, wav, duration):
         if len(wav) > 32 * 1024 * 1024:
@@ -317,7 +342,7 @@ class Session:
         """Callback for the reply wait (a worker thread): each configured reaction emoji is
         announced once per request. Skin tones and variation selectors are ignored."""
         loop, announced = asyncio.get_running_loop(), set()
-        phrases = {canonical_emoji(k): v for k, v in self.config['whatsapp'].get('reaction_phrases', {}).items()}
+        phrases = {canonical_emoji(k): v for k, v in self.chat.get('reaction_phrases', {}).items()}
 
         def on_reaction(emoji):
             emoji = canonical_emoji(emoji)
@@ -327,15 +352,15 @@ class Session:
         return on_reaction
 
     def no_reply_message(self):
-        seconds = self.config['whatsapp']['reply_timeout_seconds']
+        seconds = self.chat['reply_timeout_seconds']
         return f'No reply within {seconds // 60} min' if seconds >= 60 else f'No reply within {seconds} s'
 
     async def wait_and_speak(self, created, since=None):
         """Wait for the contact's reply to request self.message_id, created at `created`.
-        `since` is WhatsApp's timestamp for the sent message; after a restart only the local
-        creation time is known, so allow a few seconds of clock skew."""
+        `since` is the messenger's timestamp for the sent message; after a restart only the
+        local creation time is known, so allow a few seconds of clock skew."""
         await self.set_status('waiting')
-        w = self.config['whatsapp']
+        w = self.chat
         try:
             raw = await self.blocking(self.messenger.wait_reply, self.message_id, since or created - 5,
                                       created + w['reply_timeout_seconds'], AnyEvent(self.stop, self.abort),
@@ -357,7 +382,7 @@ class Session:
             return
         self.message_id = latest['message_id']
         self.transcript, self.reply = latest['transcript'], latest['reply']
-        expired = time.time() >= latest['created'] + self.config['whatsapp']['reply_timeout_seconds']
+        expired = time.time() >= latest['created'] + self.chat['reply_timeout_seconds']
         if latest['status'] in ('sending', 'sent') and expired:
             # Past its deadline (e.g. the client was away): close it out instead of retrying.
             self.store.update(self.message_id, 'expired')
@@ -368,113 +393,173 @@ class Session:
         elif latest['status'] == 'replied':
             await self.speak(self.reply)
 
-    async def process(self):
+    def busy(self):
+        return self.job is not None and not self.job.done()
+
+    async def resume(self):
+        """Finish a request left over from before a restart or reconnect, then go idle."""
         try:
             await self.recover()
         except NoReply:
             await self.set_status('idle', self.no_reply_message())
         except Cancelled:
             await self.retract()
+        except asyncio.CancelledError:
+            if self.message_id and not self.stop.is_set():  # a wake word, not a disconnect
+                self.store.update(self.message_id, 'interrupted')
+            raise
         except Exception as exc:
             LOG.warning('Recovery failed: %s', type(exc).__name__)
             await self.set_status('idle', f'Recovery failed: {type(exc).__name__}')
-        self.flush()
         await self.set_status('idle', self.error)
+
+    async def process(self):
+        """Listen for the wake word continuously. Requests and incoming texts are handled
+        as a separate job, so a wake word at any point (while transcribing, sending, waiting
+        or speaking) stops that job and starts listening at once."""
+        self.job = asyncio.create_task(self.resume())
         capture = None
         levels = deque(maxlen=50)  # last 4 s of frame loudness while waiting for the wake word
+        room = deque(maxlen=50)    # the same while nothing is in progress: the room's own noise
+        audio = self.config['audio']
         while True:
             try:
                 frame = await asyncio.wait_for(self.queue.get(), 15)
             except asyncio.TimeoutError:
                 await self.ws.close(1008, 'No microphone audio received for 15 seconds')
                 return
-            if capture is None:
-                levels.append(rms(frame))
-                score = await self.blocking(self.engines.predict, frame)
-                if score >= self.config['audio']['wake_threshold']:
-                    recent = list(levels)
-                    before = recent[:-15]
-                    if not wake_is_plausible(self.config['audio'], recent[-15:], before):
-                        LOG.info('Ignored wake word (score %.2f): phrase peak %d, room %d', score,
-                                 max(recent[-15:]), sorted(before)[len(before) // 5] if before else 0)
-                        self.engines.reset()
-                        continue
-                    threshold = speech_threshold(self.config['audio'], recent[-15:], recent)
-                    LOG.info('Wake word (score %.2f): phrase peak %d, noise %d, speech threshold %d', score,
-                             max(recent[-15:]), sorted(recent)[len(recent) // 5], threshold)
-                    capture = Capture(self.config['audio'], threshold)
-                    await self.set_status('listening')
+            if capture is not None:
+                if capture.feed(frame):
+                    LOG.info('Utterance ended after %.1f s: speech=%s, peak %d',
+                             len(capture.frames) * FRAME_SECONDS, capture.speech, capture.peak)
+                    self.job = asyncio.create_task(self.handle(capture.pcm))
+                    capture = None
+                    levels.clear()
                 continue
-            if not capture.feed(frame):
+            busy = self.busy()
+            levels.append(rms(frame))
+            if not busy:
+                room.append(levels[-1])
+            score = await self.blocking(self.engines.predict, frame)
+            if score >= audio['wake_threshold']:
+                recent = list(levels)
+                before = recent[:-15]
+                # While the Echo is talking its own voice is the background the wake phrase
+                # has to stand out from, so a lower margin applies.
+                check = dict(audio, wake_min_ratio=audio.get('barge_in_min_ratio', 1.5)) if busy else audio
+                if not wake_is_plausible(check, recent[-15:], before):
+                    LOG.info('Ignored wake word (score %.2f): phrase peak %d, room %d', score,
+                             max(recent[-15:]), sorted(before)[len(before) // 5] if before else 0)
+                    self.engines.reset()
+                    continue
+                if busy:
+                    await self.interrupt()
+                    # The reply playing masks how loudly the wake phrase was said; size the
+                    # request's speech level from the quiet room alone.
+                    threshold = speech_threshold(audio, [], list(room))
+                else:
+                    threshold = speech_threshold(audio, recent[-15:], recent)
+                LOG.info('Wake word (score %.2f): phrase peak %d, noise %d, speech threshold %d', score,
+                         max(recent[-15:]), sorted(recent)[len(recent) // 5], threshold)
+                self.engines.reset()
+                capture = Capture(audio, threshold)
+                await self.set_status('listening')
                 continue
-            LOG.info('Utterance ended after %.1f s: speech=%s, peak %d', len(capture.frames) * FRAME_SECONDS,
-                     capture.speech, capture.peak)
-            levels.clear()
-            pcm, capture = capture.pcm, None
+            if not busy:
+                text = self.messenger.unread()
+                if text:
+                    self.job = asyncio.create_task(self.read_message(text))
+
+    async def interrupt(self):
+        """A wake word while busy: drop the request or text in progress and silence the Echo.
+        An unanswered text request's reply is still read out when it arrives (as unread)."""
+        job, self.job = self.job, None
+        LOG.info('Wake word while %s: interrupting', self.status)
+        self.abort.set()  # ends a reply wait in its worker thread
+        job.cancel()
+        self.playback_id = None
+        async with self.audio_lock:  # after any segment already in transfer
+            await self.event(type='stop_audio')
+
+    async def read_message(self, text):
+        """Read aloud a text the contact sent on its own, not as the reply to a request."""
+        LOG.info('Reading an incoming text aloud')
+        self.reply, self.error = speakable(text)[:self.chat['max_reply_chars']], None
+        try:
+            await self.speak(self.reply, audio_id=f'message-{uuid.uuid4().hex[:8]}')
+        except Exception as exc:
+            LOG.warning('Reading the text failed: %s', type(exc).__name__)
+        await self.set_status('idle')
+
+    async def handle(self, pcm):
+        """One spoken request, from transcription to the spoken answer."""
+        self.cancel, self.abort = asyncio.Event(), threading.Event()
+        created = False
+        try:
+            await self.set_status('transcribing')
             try:
-                await self.set_status('transcribing')
-                try:
-                    self.transcript = await self.blocking(self.transcribe, pcm) if pcm else ''
-                except Exception as exc:
-                    LOG.warning('Transcription failed: %s', exc)
-                    await self.set_status('idle', "Speech recognition isn't reachable; check the internet connection")
-                    continue
-                if not self.transcript:
-                    await self.set_status('idle', 'No speech recognized; say the wake phrase again')
-                    continue
-                if is_noise_transcript(self.transcript):
-                    LOG.info('Ignored likely accidental trigger: transcript was non-speech')
-                    await self.set_status('idle')
-                    continue
-                if is_cancel_phrase(self.transcript):
-                    LOG.info('Request cancelled by voice')
-                    await self.set_status('idle', 'Cancelled')
-                    continue
-                decision = await self.route(self.transcript)
-                if decision == 'cancel':
-                    await self.set_status('idle', 'Cancelled')
-                    continue
-                if decision == 'accidental':
-                    await self.set_status('idle')
-                    continue
-                if isinstance(decision, (controls.Command, skills.Skill)):
-                    await self.control(decision)
-                    await self.set_status('idle', self.error)
-                    continue
-                # A short window to discard a false trigger before anything is sent.
-                self.cancel.clear()
-                self.abort.clear()
-                delay = self.config['whatsapp'].get('send_delay_seconds', 0)
-                if delay:
-                    await self.set_status('confirming')
-                    with suppress(asyncio.TimeoutError):
-                        await asyncio.wait_for(self.cancel.wait(), delay)
-                    if self.cancel.is_set():
-                        LOG.info('Request cancelled before sending')
-                        await self.set_status('idle', 'Cancelled')
-                        continue
-                self.reply = ''
-                self.message_id = f'<{uuid.uuid4()}@pi-voice>'
-                self.store.create(self.message_id, self.transcript)
-                await self.set_status('waiting')
-                sent = await self.blocking(self.messenger.send, self.transcript)
-                # Keep WhatsApp's ID: replies are matched to it, including after a restart.
-                self.store.rename(self.message_id, sent['id'])
-                self.message_id = sent['id']
-                self.store.update(self.message_id, 'sent')
-                await self.event(type='sent', id=self.message_id)  # the Echo chimes
-                await self.wait_and_speak(self.store.latest()['created'], sent['timestamp'])
-                await self.set_status('idle')
-            except NoReply:
-                LOG.info('No reply to %s before the deadline', self.message_id)
-                await self.set_status('idle', self.no_reply_message())
-            except Cancelled:
-                await self.retract()
+                self.transcript = await self.blocking(self.transcribe, pcm) if pcm else ''
             except Exception as exc:
-                LOG.warning('Request failed: %s', type(exc).__name__)
-                await self.set_status('idle', f'{type(exc).__name__}: request failed; check WhatsApp/network')
-            finally:
-                self.flush()
+                LOG.warning('Transcription failed: %s', exc)
+                await self.set_status('idle', "Speech recognition isn't reachable; check the internet connection")
+                return
+            if not self.transcript:
+                await self.set_status('idle', 'No speech recognized; say the wake phrase again')
+                return
+            if is_noise_transcript(self.transcript):
+                LOG.info('Ignored likely accidental trigger: transcript was non-speech')
+                await self.set_status('idle')
+                return
+            if is_cancel_phrase(self.transcript):
+                LOG.info('Request cancelled by voice')
+                await self.set_status('idle', 'Cancelled')
+                return
+            decision = await self.route(self.transcript)
+            if decision == 'cancel':
+                await self.set_status('idle', 'Cancelled')
+                return
+            if decision == 'accidental':
+                await self.set_status('idle')
+                return
+            if isinstance(decision, (controls.Command, skills.Skill)):
+                await self.control(decision)
+                await self.set_status('idle', self.error)
+                return
+            # A short window to discard a false trigger before anything is sent.
+            delay = self.chat.get('send_delay_seconds', 0)
+            if delay:
+                await self.set_status('confirming')
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self.cancel.wait(), delay)
+                if self.cancel.is_set():
+                    LOG.info('Request cancelled before sending')
+                    await self.set_status('idle', 'Cancelled')
+                    return
+            self.reply = ''
+            self.message_id = f'<{uuid.uuid4()}@pi-voice>'
+            self.store.create(self.message_id, self.transcript)
+            created = True
+            await self.set_status('waiting')
+            sent = await self.blocking(self.messenger.send, self.transcript)
+            # Keep the messenger's ID: replies are matched to it, including after a restart.
+            self.store.rename(self.message_id, sent['id'])
+            self.message_id = sent['id']
+            self.store.update(self.message_id, 'sent')
+            await self.event(type='sent', id=self.message_id)  # the Echo chimes
+            await self.wait_and_speak(self.store.latest()['created'], sent['timestamp'])
+            await self.set_status('idle')
+        except asyncio.CancelledError:
+            if created and not self.stop.is_set():  # a wake word, not a disconnect
+                self.store.update(self.message_id, 'interrupted')
+            raise
+        except NoReply:
+            LOG.info('No reply to %s before the deadline', self.message_id)
+            await self.set_status('idle', self.no_reply_message())
+        except Cancelled:
+            await self.retract()
+        except Exception as exc:
+            LOG.warning('Request failed: %s', type(exc).__name__)
+            await self.set_status('idle', f'{type(exc).__name__}: request failed; check the messenger/network')
 
     async def route(self, text):
         """A device command from the grammar, else Jev's decision when it is configured,
@@ -656,6 +741,10 @@ class Session:
     async def retract(self):
         """Delete the cancelled request from the chat for everyone, and stop waiting."""
         self.store.update(self.message_id, 'cancelled')
+        if not getattr(self.messenger, 'can_unsend', True):
+            LOG.info('Cancelled %s; texts cannot be unsent', self.message_id)
+            await self.set_status('idle', 'Cancelled; the text was already sent')
+            return
         try:
             await self.blocking(self.messenger.revoke, self.message_id)
             LOG.info('Cancelled and unsent %s', self.message_id)
@@ -715,12 +804,15 @@ class Session:
                 self.clock.listeners.remove(self.clock_changed)
             if self.pairing_timer:
                 self.pairing_timer.cancel()
+            job = self.job
             receiver.cancel()
             processor.cancel()
             telemetry.cancel()
             if probe:
                 probe.cancel()
-            await asyncio.gather(receiver, processor, telemetry, return_exceptions=True)
+            if job:
+                job.cancel()
+            await asyncio.gather(receiver, processor, telemetry, *([job] if job else []), return_exceptions=True)
 
 
 async def serve(config, engines):
@@ -744,6 +836,10 @@ async def serve(config, engines):
             hub.update(voice_volume=level)
         hub = Hub(config['mqtt'], asyncio.get_running_loop(), levels.speech_volume, set_voice_volume)
     clock, weather = skills.Clock(state), skills.Weather()
+    messenger = None  # WhatsApp: one bridge client per session
+    if config['messenger'] == 'sms':
+        messenger = GoogleVoice(config['sms'], state)
+        messenger.start()
 
     async def ticker():  # finished timers start ringing, even with no Echo connected
         while True:
@@ -789,7 +885,7 @@ async def serve(config, engines):
         session = None
         try:
             session = Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather,
-                              lamp=lamp, hub=hub)
+                              lamp=lamp, hub=hub, messenger=messenger)
             if hub:
                 hub.attach(session)
             await session.run()
@@ -822,6 +918,8 @@ async def serve(config, engines):
         refresher.cancel()
     if hub:
         hub.close()
+    if messenger:
+        messenger.close()
     store.db.close()
 
 

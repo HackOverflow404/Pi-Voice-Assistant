@@ -25,7 +25,9 @@ from voice_assistant.app import Session, system_stats
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.controls import Levels
 from voice_assistant.store import Store
+from voice_assistant.sms import GoogleVoice, message_text
 from voice_assistant.whatsapp import WhatsApp
+from email import message_from_string, policy
 
 AUDIO = dict(speech_rms=450, silence_seconds=0.16, start_timeout_seconds=0.24,
              max_utterance_seconds=0.8, wake_threshold=0.5)
@@ -295,6 +297,62 @@ class WhatsAppTests(unittest.TestCase):
         down = WhatsApp(dict(bridge_url='http://127.0.0.1:9', contact='Instinct', reply_settle_seconds=0))
         with self.assertRaises(TimeoutError):
             down.wait_reply('ABC', 1000, time.time() + 1, threading.Event())
+
+
+FORWARDED = """From: "(555) 555-0123" <15551230000.15555550123.AbC-dEf@txt.voice.google.com>
+To: me@gmail.com
+Subject: New text message from (555) 555-0123
+Date: Mon, 05 Oct 2026 10:00:00 -0700
+Content-Type: text/plain; charset="UTF-8"
+
+<https://voice.google.com>
+Your lab report is due at eleven fifty-nine PM.
+It is worth ten percent.
+
+YOUR ACCOUNT <https://voice.google.com> HELP CENTER <https://support.google.com/voice>
+To respond to this text message, reply to this email or visit Google Voice.
+"""
+
+
+class SmsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.sms = GoogleVoice(dict(contact='+1 555 555 0123', gmail_address='me@gmail.com', app_password='x',
+                                    reply_settle_seconds=0.2, stale_minutes=60), self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_forwarded_text_without_google_footer(self):
+        mail = message_from_string(FORWARDED, policy=policy.default)
+        self.assertTrue(self.sms.is_contact(mail))
+        self.assertEqual(message_text(mail), 'Your lab report is due at eleven fifty-nine PM.\nIt is worth ten percent.')
+        other = message_from_string(FORWARDED.replace('15555550123', '15559876543'), policy=policy.default)
+        self.assertFalse(self.sms.is_contact(other))
+
+    def test_reply_joins_texts_after_the_request_and_leaves_earlier_ones(self):
+        start = time.time()
+        self.sms.receive('Earlier news.', start - 30)
+        threading.Timer(0.1, self.sms.receive, ('Two things are due.', time.time())).start()
+        threading.Timer(0.2, self.sms.receive, ('Lab report and pre-lab.', time.time())).start()
+        reply = self.sms.wait_reply('id', start - 2, time.time() + 5, threading.Event())
+        self.assertEqual(reply, 'Two things are due.\n\nLab report and pre-lab.')
+        time.sleep(0.25)
+        self.assertEqual(self.sms.unread(), 'Earlier news.')
+        self.assertIsNone(self.sms.unread())
+
+    def test_unread_waits_to_settle_and_drops_stale(self):
+        self.sms.receive('Old.', time.time() - 7200)
+        self.sms.receive('Hello there.', time.time())
+        self.assertIsNone(self.sms.unread())  # may be the first of several
+        time.sleep(0.25)
+        self.assertEqual(self.sms.unread(), 'Hello there.')
+
+    def test_timeout_and_no_address(self):
+        with self.assertRaises(TimeoutError):
+            self.sms.wait_reply('id', time.time(), time.time() + 0.3, threading.Event())
+        with self.assertRaisesRegex(RuntimeError, 'voice.google.com'):
+            self.sms.send('Hello')
 
 
 class FakeDeepgram(BaseHTTPRequestHandler):
@@ -682,6 +740,62 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['error'], 'Cancelled and unsent')
         self.assertEqual(revoked, ['WA1'])
         self.assertEqual(self.store.latest()['status'], 'cancelled')
+
+    async def test_wake_word_while_speaking_stops_and_listens(self):
+        await self.speak_request()
+        await self.until('speaking')
+        await self.socket.incoming.put(SPEECH)  # "Hey Clippy" over the reply
+        events = await self.until('listening')
+        self.assertTrue(any(isinstance(e, dict) and e.get('type') == 'stop_audio' for e in events))
+        self.assertEqual(self.store.latest()['status'], 'interrupted')  # not read again on reconnect
+        self.session.engines.transcribe = lambda pcm: 'What time is it?'
+        await self.socket.incoming.put(SPEECH + SILENCE * 2)
+        await self.until('speaking')  # the new request, answered on the Pi
+        self.assertEqual(self.sent, ['What assignments are due?'])
+
+    async def test_wake_word_while_waiting_abandons_the_reply_watch(self):
+        stopped = threading.Event()
+        def waiting(request, since, deadline, stop, on_reaction=None):
+            stop.wait(5)
+            stopped.set()
+            raise InterruptedError('Reply watch cancelled')
+        self.session.messenger.wait_reply = waiting
+        await self.speak_request()
+        await self.until('sent')
+        await self.socket.incoming.put(SPEECH)
+        await self.until('listening')
+        for _ in range(100):
+            if stopped.is_set(): break
+            await asyncio.sleep(0.01)
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(self.store.latest()['status'], 'interrupted')
+
+    async def test_unsolicited_text_is_read_aloud_when_idle(self):
+        texts = ['Reminder: your exam is tomorrow.']
+        self.session.messenger.unread = lambda: texts.pop() if texts else None
+        self.session.engines.predict = lambda frame: 0  # no wake word
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await self.socket.incoming.put(SILENCE)  # unread texts are checked as audio arrives
+        events = await self.until('audio_start')
+        self.assertTrue(events[-1]['id'].startswith('message-'))
+        self.assertEqual(self.session.reply, 'Reminder: your exam is tomorrow.')
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': events[-1]['id']}))
+        await self.until('idle')
+        self.assertIsNone(self.store.latest())  # not a request
+
+    async def test_text_cancel_while_waiting_cannot_unsend(self):
+        def waiting(request, since, deadline, stop, on_reaction=None):
+            stop.wait(5)
+            raise InterruptedError('Reply watch cancelled')
+        self.session.messenger.wait_reply = waiting
+        self.session.messenger.can_unsend = False
+        await self.speak_request()
+        await self.until('sent')
+        await self.until('waiting')
+        await self.socket.incoming.put(json.dumps({'type': 'cancel'}))
+        events = await self.until('idle')
+        self.assertEqual(events[-1]['error'], 'Cancelled; the text was already sent')
 
     async def test_spoken_cancel_sends_nothing(self):
         self.session.engines.transcribe = lambda pcm: 'Never mind.'

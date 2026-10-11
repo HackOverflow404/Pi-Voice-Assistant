@@ -1,14 +1,18 @@
 # Pi Voice Assistant
 
-A Raspberry Pi runs wake-word detection, speech recognition, WhatsApp messaging,
-and speech synthesis. An Echo Show 5 running LineageOS supplies the microphone,
+A Raspberry Pi runs wake-word detection, speech recognition, messaging (SMS through
+Google Voice, or WhatsApp), and speech synthesis. An Echo Show 5 running LineageOS supplies the microphone,
 speaker, and Jetpack Compose dashboard. No cloud speech service is used.
 
 ```
 Echo mic → authenticated WebSocket → openWakeWord → utterance capture → Whisper
-    → WhatsApp text to the "Instinct" chat (wa-bridge, linked to your account)
-    ← Instinct's WhatsApp reply ← Piper, one sentence at a time ← Echo speaker
+    → SMS to Instinct (sms.contact) from a Google Voice number, sent through Gmail
+    ← Instinct's text, forwarded to Gmail ← Piper, one sentence at a time ← Echo speaker
 ```
+
+`messenger: whatsapp` switches back to the WhatsApp bridge; see [SMS](#sms-google-voice)
+and [WhatsApp](#whatsapp). Saying the wake phrase at **any** point, while a request is
+being transcribed, sent, waited on or read out, stops it and starts listening again.
 
 The server emits `idle`, `listening`, `transcribing`, `waiting`, and `speaking`
 events with the last transcript and reply. Only one microphone client can own
@@ -18,7 +22,8 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 
 ## Files
 
-- `server/voice_assistant/`: Python server, audio framing, speech engines, WhatsApp client, SQLite outbox.
+- `server/voice_assistant/`: Python server, audio framing, speech engines, SMS (`sms.py`) and WhatsApp
+  clients, SQLite outbox.
 - `bridge/`: Go WhatsApp bridge (whatsmeow) the server talks to over localhost HTTP.
 - `android/`: Kotlin app, minimum API 26, target API 33, compiled against API 35.
 - `config.example.yaml`: configuration template; `config.yaml` is private and ignored by Git.
@@ -113,7 +118,32 @@ journalctl --user -u pi-voice-assistant -f
 A reply wait survives bridge and WhatsApp reconnects within the original deadline.
 A temporary startup network failure is handled by the reconnect loops. No Pi
 microphone or audio device is needed. If CPU inference cannot keep pace with
-16 kHz input, the server closes the connection instead of accumulating stale audio.
+16 kHz input (e.g. while Whisper transcribes), the server drops the oldest audio
+instead of falling behind.
+
+## SMS (Google Voice)
+
+With `messenger: sms` the Pi texts `sms.contact` from a free **Google Voice** number and
+reads aloud **every** text that number receives from the contact: the reply to each request,
+and anything the contact sends on its own (read as soon as the Echo is idle). It needs no
+phone, modem or paid gateway, only the Gmail account that owns the Voice number:
+
+1. Get a number at [voice.google.com](https://voice.google.com) with the Gmail account.
+2. In Voice, open **Settings → Messages** and turn on **Forward messages to email**.
+3. Text the contact once from voice.google.com (Google Voice can't start a conversation by
+   email) and wait for its answer. That forwarded email's sender,
+   `<voice>.<contact>.<token>@txt.voice.google.com`, is the address the Pi replies to. It
+   is found in the inbox automatically and saved in `state/sms.json`.
+4. Create a Gmail app password (needs 2-Step Verification) at
+   [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) and set
+   `sms.gmail_address` and `sms.app_password` in the installed `config.yaml`.
+
+The Pi sends over SMTP and checks Gmail over IMAP every `sms.poll_seconds`, read-only, so
+forwarded texts stay unread in Gmail. On first start it skips the existing inbox; a text
+older than `sms.stale_minutes` (the Echo was offline) is dropped, not read. Texts come
+from the Voice number, so the contact sees a new sender. A text can't be unsent: a cancel
+tap after sending only stops waiting. If you interrupt a request with the wake word, its
+reply is still read out when it arrives.
 
 ## WhatsApp
 
@@ -228,10 +258,14 @@ The wake-word model occasionally fires on near-silence or on TV and conversation
 
 - A detection only counts if the phrase is `audio.wake_min_ratio` (6) times louder than the
   room just before it; ignored detections are logged as "Ignored wake word".
-- After transcribing, the Echo shows "Sending in 3" for `whatsapp.send_delay_seconds`; tap
+- A detection while the Echo is busy (a request in progress, a reply playing) interrupts it;
+  it needs only `audio.barge_in_min_ratio` (1.5) over the background, which then includes the
+  Echo's own voice.
+- After transcribing, the Echo shows "Sending in 3" for `send_delay_seconds`; tap
   the card to discard the request. Saying just "cancel" or "never mind" also discards it.
 - While waiting for the reply, tapping the card cancels the request and deletes the
   WhatsApp message for everyone (the bridge's `/revoke`). Instinct may already have seen it.
+  Over SMS it only stops waiting.
 
 ## Built-in skills
 
@@ -421,8 +455,9 @@ adb uninstall com.instinct.voice
   play back to back while later ones are still being synthesized and downloaded.
 - After the segment marked `last`, Android sends `{"type":"playback_done","id":"<message-id>"}`
   (or `playback_error`). The server remains speaking until a matching acknowledgement
-  or timeout. Mic packets continue, containing zeros while transcribing/waiting/
-  speaking; the server also discards them. Wake detection cannot trigger on TTS.
+  or timeout. Mic audio streams in every state and wake detection never pauses. A wake
+  word while busy cancels the job on the Pi and sends `{"type":"stop_audio"}` (after any
+  segment already in transfer); Android stops the sentence playing and skips queued ones.
 - Connection failures retry with 1–30 second backoff. Queues and utterance size
   are bounded. Mic streams that stop for 15 seconds are disconnected.
 - `state/requests.sqlite3` records a request ID, transcript, reply, creation time,

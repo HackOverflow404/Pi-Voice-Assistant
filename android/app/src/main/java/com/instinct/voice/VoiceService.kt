@@ -21,11 +21,13 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** One synthesized sentence of a reply; the server marks the reply's final segment. */
-private class Segment(val file: File, val id: String, val last: Boolean, val volume: Float)
+/** One synthesized sentence of a reply; the server marks the reply's final segment.
+ *  `generation` counts stop_audio events, so segments queued before a stop are skipped. */
+private class Segment(val file: File, val id: String, val last: Boolean, val volume: Float, val generation: Int)
 
 private sealed interface Incoming {
     data object Open : Incoming
@@ -41,6 +43,8 @@ class VoiceService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var socket: WebSocket? = null
     @Volatile private var muted = true
+    // Ends the sentence playing now; set by play() while a MediaPlayer is running.
+    @Volatile private var stopPlaying: (() -> Unit)? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -189,11 +193,14 @@ class VoiceService : Service() {
         // Replies arrive one sentence at a time; play each as soon as it is complete while
         // the next downloads, and acknowledge once after the last segment.
         val segments = Channel<Segment>(Channel.UNLIMITED)
+        val generation = AtomicInteger()
         val player = launch {
             var failedId: String? = null
             for (segment in segments) {
                 try {
-                    if (failedId != segment.id) play(segment.file, segment.volume)
+                    if (failedId != segment.id && segment.generation == generation.get()) {
+                        play(segment.file, segment.volume)
+                    }
                 } catch (cancel: CancellationException) {
                     throw cancel
                 } catch (_: Exception) {
@@ -225,7 +232,15 @@ class VoiceService : Service() {
                                 chimeVolume = json.optDouble("speech_volume", chimeVolume.toDouble()).toFloat()
                                 if (status == "listening" && lastStatus != "listening") Chimes.listening(chimeVolume)
                                 lastStatus = status
-                                muted = status !in listOf("idle", "listening")
+                                // The microphone stays live in every state so the wake word can
+                                // interrupt a request or reply at any point.
+                                muted = false
+                            }
+                            "stop_audio" -> {
+                                // The wake word was heard while talking: drop what is queued and
+                                // cut off the sentence playing now.
+                                generation.incrementAndGet()
+                                stopPlaying?.invoke()
                             }
                             "sent" -> Chimes.sent(chimeVolume)
                             "media_volume" -> {
@@ -255,7 +270,7 @@ class VoiceService : Service() {
                                     "Incomplete WAV transfer"
                                 }
                                 output?.close(); output = null
-                                segments.send(Segment(file!!, audioId!!, last, volume))
+                                segments.send(Segment(file!!, audioId!!, last, volume, generation.get()))
                                 file = null
                                 audioId = null
                             }
@@ -330,6 +345,7 @@ class VoiceService : Service() {
             player.prepare()
             val completed = withTimeoutOrNull(player.duration.toLong() + 10000) {
                 suspendCancellableCoroutine<Unit> { continuation ->
+                    stopPlaying = { if (continuation.isActive) continuation.resume(Unit) }
                     player.setOnCompletionListener { if (continuation.isActive) continuation.resume(Unit) }
                     player.setOnErrorListener { _, what, extra ->
                         if (continuation.isActive) continuation.resumeWithException(IllegalStateException("Playback $what/$extra"))
@@ -341,6 +357,7 @@ class VoiceService : Service() {
             }
             check(completed == true) { "Playback timed out" }
         } finally {
+            stopPlaying = null
             manager.abandonAudioFocusRequest(focus)
             player.release()
         }

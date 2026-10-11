@@ -23,8 +23,35 @@ audio:
   # silence or TV 1.5-4x. Low values rely on the later filters (noise transcripts, the send
   # countdown, Jev's accidental route) to catch the rest.
   wake_min_ratio: 3
+  # The same while a request is in progress or a reply is playing: the wake word interrupts
+  # it, and the Echo's own voice is the background it must stand out from.
+  barge_in_min_ratio: 1.5
   # Keep the last five raw recordings in state/utterances for tuning. Off by default.
   debug_save_utterances: false
+# Where spoken requests go: sms (a Google Voice number, through its Gmail account) or
+# whatsapp (the wa-bridge). Only the chosen section is used.
+messenger: sms
+sms:
+  # The assistant's phone number. Every text it sends is read aloud: replies to requests
+  # and messages it sends on its own.
+  contact: "+15555550123"
+  # The Gmail account that owns the Google Voice number, and an app password for it
+  # (myaccount.google.com/apppasswords; needs 2-Step Verification). Keep this file private.
+  gmail_address: you@gmail.com
+  app_password: REPLACE_WITH_GMAIL_APP_PASSWORD
+  # Found automatically in the inbox once the contact has texted the Voice number;
+  # set it to skip the search (the From address of a forwarded text).
+  reply_address: ""
+  # Gmail folder the forwarded texts land in, and how often to check it.
+  mailbox: INBOX
+  poll_seconds: 3
+  reply_timeout_seconds: 180
+  reply_settle_seconds: 3
+  max_reply_chars: 4000
+  send_delay_seconds: 3
+  # Texts that arrive while the Echo is offline are read on reconnect unless older than this.
+  stale_minutes: 60
+  instruction: '(Spoken request; your reply will be read aloud. Answer in plain, complete sentences with every word written out: no abbreviations, symbols, emoji, lists or formatting. Put your whole answer in one message.)'
 whatsapp:
   # Local bridge (bridge/, systemd unit wa-bridge) that is linked to your WhatsApp account.
   bridge_url: http://127.0.0.1:8766
