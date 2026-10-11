@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Install echo-presence on the Pi (default: mainframe) as a systemd user service, from this
+# machine. Live copy: ~/.local/share/echo-presence there; an existing config.toml is kept.
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+host=${PI_HOST:-mainframe}
+live=.local/share/echo-presence
+echo "Installing to $host:~/$live and $host:~/.config/systemd/user/echo-presence.service"
+ssh "$host" "mkdir -p ~/$live/models ~/.config/systemd/user"
+scp -q presence.py logic.py requirements.txt "$host:$live/"
+if ssh "$host" "test -f ~/$live/config.toml"; then
+  echo "Keeping the existing $host:~/$live/config.toml (edit it there, or copy config.toml over it)."
+else
+  scp -q config.toml "$host:$live/"
+fi
+scp -q systemd/echo-presence.service "$host:.config/systemd/user/"
+ssh "$host" bash -s <<'REMOTE'
+set -euo pipefail
+cd ~/.local/share/echo-presence
+[[ -x .venv/bin/python ]] || python3.11 -m venv .venv
+.venv/bin/pip install -q --upgrade pip
+.venv/bin/pip install -q -r requirements.txt
+fetch() {  # name, URL path under mediapipe-models, sha256
+  [[ -f models/$1 ]] && sha256sum -c --status <<<"$3  models/$1" && return
+  curl -fsSL --retry 3 -o "models/$1.part" "https://storage.googleapis.com/mediapipe-models/$2/$1"
+  sha256sum -c --status <<<"$3  models/$1.part" || { echo "Checksum mismatch: $1" >&2; exit 1; }
+  mv "models/$1.part" "models/$1"
+}
+fetch blaze_face_short_range.tflite face_detector/blaze_face_short_range/float16/latest \
+  b4578f35940bf5a1a655214a1cce5cab13eba73c1297cd78e1a04c2380b0152f
+fetch efficientdet_lite0.tflite object_detector/efficientdet_lite0/int8/latest \
+  0720bf247bd76e6594ea28fa9c6f7c5242be774818997dbbeffc4da460c723bb
+fetch gesture_recognizer.task gesture_recognizer/gesture_recognizer/float16/latest \
+  97952348cf6a6a4915c2ea1496b4b37ebabc50cbbf80571435643c455f2b0482
+systemctl --user daemon-reload
+systemctl --user enable echo-presence.service
+systemctl --user restart echo-presence.service
+sleep 3
+systemctl --user is-active echo-presence.service
+REMOTE

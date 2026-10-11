@@ -1,0 +1,41 @@
+# echo-presence configuration. Distances are calibrated by face width, as a fraction of
+# the frame's width: run `presence.py --debug` and read the logged face widths at the
+# distances you want (see README).
+
+[stream]
+url = "tcp://127.0.0.1:7002"   # SECUR-T hub, Annex-B
+width = 640
+height = 360
+keyframes_only = false          # true: ~1 fps, nearly free to decode, but zone changes lag ~2 s
+
+[mqtt]
+host = "127.0.0.1"
+port = 1883
+
+[presence]
+face_hz = 5                     # face detection rate (~18 ms each on a Pi 4)
+person_every = 1.5              # seconds between person-detector runs while no face is visible (~250 ms
+                                # each), alternating between the left and right square of the frame
+throttle_temp = 78              # halve the rates at or above this CPU temperature (C)
+
+[presence.zones]
+# Calibrated 2026-10-10: desk median 0.133, near/far boundary median 0.128 (p10 0.119); across
+# the room (~3 m) no face is found at all, so far comes from the person detector.
+near_enter = 0.115
+near_exit = 0.095
+to_near = 0.6
+to_far = 1.5
+to_back = 0.5
+face_lost = 8.0
+person_near = 0.85            # a body this tall (fraction of frame) still counts as near
+person_hold = 6.0
+away_after = 90.0
+
+[hands]
+# Off on a Pi 4: hand tracking there runs at ~5 fps and starves Clippy's wake word.
+# On a Pi 5, set enabled = true (and use the current mediapipe release in requirements.txt).
+enabled = false
+max_fps = 15
+
+[hands.gestures]
+swipe_left_is = "next"          # a swipe toward your own left skips forward

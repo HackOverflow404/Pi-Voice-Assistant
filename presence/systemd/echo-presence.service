@@ -1,0 +1,24 @@
+[Unit]
+Description=echo-presence (who is in front of the Echo Show, from its camera)
+After=network-online.target secur-t-hub.service mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/echo-presence
+Environment=PYTHONUNBUFFERED=1
+Environment=GLOG_minloglevel=2
+ExecStart=%h/.local/share/echo-presence/.venv/bin/python presence.py --config config.toml
+Restart=on-failure
+RestartSec=10
+# Clippy's wake word and Home Assistant come first: this yields CPU to them under load.
+Nice=10
+CPUWeight=30
+MemoryMax=450M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=default.target

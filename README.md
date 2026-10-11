@@ -25,6 +25,8 @@ There is a 5-second no-speech timeout and a 20-second utterance limit.
 - `server/voice_assistant/`: Python server, audio framing, speech engines, SMS (`sms.py`) and WhatsApp
   clients, SQLite outbox.
 - `bridge/`: Go WhatsApp bridge (whatsmeow) the server talks to over localhost HTTP.
+- `presence/`: echo-presence, the camera service that tells the dashboard how close someone is
+  (near / far / away), with hand gestures ready for a Pi 5. A separate user service; see its README.
 - `android/`: Kotlin app, minimum API 26, target API 33, compiled against API 35.
 - `config.example.yaml`: configuration template; `config.yaml` is private and ignored by Git.
 - `models/`: custom wake classifier plus downloaded Whisper / Piper models.

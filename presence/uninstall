@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Remove echo-presence from the Pi (default: mainframe): the service, its live copy, and its
+# retained MQTT topics and Home Assistant entities. Clippy's dashboard falls back to its full
+# layout ("unknown" presence) on its own.
+set -euo pipefail
+host=${PI_HOST:-mainframe}
+echo "Removing $host:~/.local/share/echo-presence and its user service"
+ssh "$host" bash -s <<'REMOTE'
+set -euo pipefail
+systemctl --user disable --now echo-presence.service 2>/dev/null || true
+rm -f ~/.config/systemd/user/echo-presence.service
+systemctl --user daemon-reload
+clear() { mosquitto_pub -h 127.0.0.1 -r -n -t "$1"; }
+clear clippy/vision/presence
+clear clippy/vision/availability
+clear homeassistant/sensor/echo_presence_zone/config
+clear homeassistant/binary_sensor/echo_occupancy/config
+clear homeassistant/event/echo_gesture/config
+rm -rf ~/.local/share/echo-presence
+REMOTE

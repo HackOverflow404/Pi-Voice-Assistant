@@ -1,0 +1,5 @@
+# 0.10.18 is the newest MediaPipe that runs on a Pi 4: 1.x wheels need the ARMv8 AES
+# extension, which the Pi 4's Cortex-A72 lacks (SIGILL). A Pi 5 can use the current release.
+mediapipe==0.10.18
+numpy<2
+paho-mqtt>=2,<3
