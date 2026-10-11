@@ -1,6 +1,20 @@
 package com.instinct.voice
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.lerp
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onPlaced
+import androidx.compose.ui.zIndex
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -78,6 +92,7 @@ private val clockFormat = DateTimeFormatter.ofPattern("HH:mm")
 private val secondsFormat = DateTimeFormatter.ofPattern("ss")
 private val dateFormat = DateTimeFormatter.ofPattern("EEEE  d MMMM")
 private val dayFormat = DateTimeFormatter.ofPattern("EEE")
+private val farDateFormat = DateTimeFormatter.ofPattern("EEEE d MMM")
 
 private fun Double.deg() = "${roundToInt()}°"
 
@@ -129,31 +144,299 @@ fun GlanceDashboard(
         if (state.status != "idle") conversation = true
         else if (conversation) { delay(20_000); conversation = false }
     }
+    // From across the room (or with nobody there) the tiles morph into a few large ones; walking
+    // up morphs them back. The Pi decides the zone with hysteresis, so this changes rarely.
+    val far = state.zone == "far" || state.zone == "away"
+    val progress = remember { Animatable(if (far) 1f else 0f) }
+    LaunchedEffect(far) {
+        // Critically damped: glides in, settles without overshoot, and turns smoothly if the
+        // zone flips back mid-way.
+        progress.animateTo(if (far) 1f else 0f, spring(dampingRatio = 1f, stiffness = 90f))
+    }
+    val morph = remember { Morph { progress.value } }
     // No settings button on the display; a long press anywhere opens the connection settings.
     Box(Modifier.fillMaxSize().background(Page).pointerInput(Unit) { detectTapGestures(onLongPress = { onSettings() }) }) {
         CompositionLocalProvider(LocalTextStyle provides Base) {
-            // 800 x 400 dp: clock over weather | agenda (or conversation) over voice and Pi.
-            Row(Modifier.fillMaxSize().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column(Modifier.width(330.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ClockTile(now, Modifier.height(150.dp).fillMaxWidth())
-                    // Timers and the stopwatch take the weather tile's place while any exist.
-                    AnimatedContent(state.clockItems.isNotEmpty(), Modifier.weight(1f).fillMaxWidth(),
-                        transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) }, label = "left") { active ->
-                        if (active) TimersTile(state.clockItems, Modifier.fillMaxSize())
-                        else WeatherTile(weather, weatherError, now, Modifier.fillMaxSize())
-                    }
-                }
-                Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    AnimatedContent(conversation, Modifier.weight(1f).fillMaxWidth(),
-                        transitionSpec = { fadeIn(tween(350)) togetherWith fadeOut(tween(350)) }, label = "panel") { talking ->
-                        if (talking) ConversationCard(state, now) else AgendaCard(events, calendarAllowed, now, onAllowCalendar)
-                    }
-                    Row(Modifier.height(80.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        VoiceTile(state, Modifier.weight(1f).fillMaxHeight())
-                        PiTile(state.pi, state.connection == "Connected", now, Modifier.weight(1f).fillMaxHeight())
-                    }
-                }
+            MorphContainers(morph, Modifier.fillMaxSize())
+            // Both layouts stay composed and measured; the hidden one is fully transparent, which the
+            // renderer skips. A morph then only changes layer transforms and alpha, never layout:
+            // the Echo's CPU can't re-measure two dashboards of text at 60 fps.
+            NearLayout(morph, state, weather, weatherError, events, calendarAllowed, conversation, now,
+                onAllowCalendar, Modifier.zIndex(if (far) 0f else 2f))
+            FarLayout(morph, state, weather, weatherError, events, conversation, now,
+                Modifier.zIndex(if (far) 2f else 0f))
+            // Touches that miss the visible layout's controls stop here, never reaching the hidden one.
+            Box(Modifier.fillMaxSize().zIndex(1f).pointerInput(Unit) {
+                awaitPointerEventScope { while (true) awaitPointerEvent() }
+            })
+            GestureToast(state.toast, Modifier.align(Alignment.TopCenter).padding(top = 18.dp).zIndex(3f))
+        }
+    }
+}
+
+/** Where each tile sits in the near and far layouts, so it can glide between the two.
+ *  `progress` runs 0 (near) to 1 (far); it is read only while drawing. */
+private class Morph(val progress: () -> Float) {
+    class Spot(var rect: Rect = Rect.Zero, var brush: Brush = Graphite)
+    val near = HashMap<String, Spot>()
+    val far = HashMap<String, Spot>()
+    fun side(far: Boolean) = if (far) this.far else near
+}
+
+private fun smoothstep(from: Float, to: Float, x: Float): Float {
+    val t = ((x - from) / (to - from)).coerceIn(0f, 1f)
+    return t * t * (3 - 2 * t)
+}
+
+/** Fade through: the old layout's content is gone a third of the way in, the new layout's
+ *  arrives over the last third, and in between only the gliding containers show. */
+private fun contentAlpha(far: Boolean, p: Float) = if (far) smoothstep(0.65f, 1f, p) else 1f - smoothstep(0f, 0.35f, p)
+
+/** A tile in one layout. With a `key` that the other layout also has, the tile is stretched
+ *  from its own place to the other's as the morph runs (the content is faded out by then, so the
+ *  stretch only shows on the container); without one it just fades and settles in scale. */
+@Composable
+private fun Modifier.morph(m: Morph, far: Boolean, key: String? = null, brush: Brush = Graphite): Modifier {
+    if (key != null) {
+        val spot = remember(m, far, key) { Morph.Spot().also { m.side(far)[key] = it } }
+        SideEffect { spot.brush = brush }
+        DisposableEffect(m, far, key) { onDispose { if (m.side(far)[key] === spot) m.side(far).remove(key) } }
+    }
+    return this
+        .onPlaced { coordinates -> key?.let { m.side(far)[it]?.rect = coordinates.boundsInRoot() } }
+        .graphicsLayer {
+            val p = m.progress()
+            alpha = contentAlpha(far, p)
+            val self = key?.let { m.side(far)[it] }
+            val other = key?.let { m.side(!far)[it] }
+            if (self != null && other != null && self.rect.width > 0f && self.rect.height > 0f) {
+                val r = if (far) lerp(other.rect, self.rect, p) else lerp(self.rect, other.rect, p)
+                transformOrigin = TransformOrigin(0f, 0f)
+                scaleX = r.width / self.rect.width
+                scaleY = r.height / self.rect.height
+                translationX = r.left - self.rect.left
+                translationY = r.top - self.rect.top
+            } else {
+                transformOrigin = TransformOrigin.Center
+                scaleX = 0.94f + 0.06f * alpha
+                scaleY = scaleX
+                translationX = 0f
+                translationY = 0f
             }
+        }
+}
+
+/** The rounded containers of tiles both layouts share, drawn at their in-between places while a
+ *  morph runs, so a tile reads as one solid shape changing size rather than two cross-fading. */
+@Composable
+private fun MorphContainers(m: Morph, modifier: Modifier) {
+    Canvas(modifier) {
+        val p = m.progress()
+        if (p <= 0f || p >= 1f) return@Canvas
+        val corner = CornerRadius(26.dp.toPx())
+        for ((key, near) in m.near) {
+            val far = m.far[key] ?: continue
+            val r = lerp(near.rect, far.rect, p)
+            translate(r.left, r.top) {
+                drawRoundRect(if (p < 0.5f) near.brush else far.brush, size = r.size, cornerRadius = corner)
+            }
+        }
+    }
+}
+
+private fun timersBrush(items: List<ClockItem>) = when {
+    items.any { it.state == "ringing" } -> RingTile
+    items.all { it.kind == "stopwatch" } -> TealTile
+    else -> WarmTile
+}
+
+private fun conversationBrush(state: Dashboard) = if (state.status in listOf("confirming", "waiting")) AmberTile else TealTile
+
+/** 800 x 400 dp: clock over weather | agenda (or conversation) over voice and Pi. */
+@Composable
+private fun NearLayout(
+    m: Morph, state: Dashboard, weather: Weather?, weatherError: String?, events: List<Event>,
+    calendarAllowed: Boolean, conversation: Boolean, now: LocalDateTime, onAllowCalendar: () -> Unit,
+    modifier: Modifier,
+) {
+    Row(modifier.fillMaxSize().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.width(330.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ClockTile(now, Modifier.morph(m, false, "clock").height(150.dp).fillMaxWidth())
+            // Timers and the stopwatch take the weather tile's place while any exist.
+            AnimatedContent(state.clockItems.isNotEmpty(), Modifier.weight(1f).fillMaxWidth(),
+                transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(300)) }, label = "left") { active ->
+                if (active) TimersTile(state.clockItems,
+                    Modifier.morph(m, false, "timers", timersBrush(state.clockItems)).fillMaxSize())
+                else WeatherTile(weather, weatherError, now,
+                    Modifier.morph(m, false, "weather", sky(now, weather)).fillMaxSize())
+            }
+        }
+        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            AnimatedContent(conversation, Modifier.weight(1f).fillMaxWidth(),
+                transitionSpec = { fadeIn(tween(350)) togetherWith fadeOut(tween(350)) }, label = "panel") { talking ->
+                if (talking) ConversationCard(state, now, Modifier.morph(m, false, "conversation", conversationBrush(state)))
+                else AgendaCard(events, calendarAllowed, now, onAllowCalendar, Modifier.morph(m, false, "agenda", VioletTile))
+            }
+            Row(Modifier.height(80.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                VoiceTile(state, Modifier.morph(m, false).weight(1f).fillMaxHeight())
+                PiTile(state.pi, state.connection == "Connected", now, Modifier.morph(m, false).weight(1f).fillMaxHeight())
+            }
+        }
+    }
+}
+
+/** Readable from across the room: a large clock, and beside it whichever one thing matters
+ *  most (a timer, the conversation, or the weather with the next event under it). */
+@Composable
+private fun FarLayout(
+    m: Morph, state: Dashboard, weather: Weather?, weatherError: String?, events: List<Event>,
+    conversation: Boolean, now: LocalDateTime, modifier: Modifier,
+) {
+    val nowMs = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    val next = events.firstOrNull { !it.allDay && it.end > nowMs }
+    Row(modifier.fillMaxSize().padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        ClockHero(now, Modifier.morph(m, true, "clock").weight(1.35f).fillMaxHeight())
+        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            when {
+                state.clockItems.isNotEmpty() -> TimersTile(state.clockItems,
+                    Modifier.morph(m, true, "timers", timersBrush(state.clockItems)).weight(1f).fillMaxWidth())
+                conversation -> ConversationCard(state, now,
+                    Modifier.morph(m, true, "conversation", conversationBrush(state)).weight(1f).fillMaxWidth())
+                else -> FarWeatherTile(weather, weatherError, now,
+                    Modifier.morph(m, true, "weather", sky(now, weather)).weight(1f).fillMaxWidth())
+            }
+            if (!conversation && next != null) NextStrip(next, now,
+                Modifier.morph(m, true, "agenda", VioletTile).height(140.dp).fillMaxWidth())
+        }
+    }
+}
+
+/** The clock at full size: date above, hours and minutes below, the minute line along the bottom. */
+@Composable
+private fun ClockHero(now: LocalDateTime, modifier: Modifier) {
+    Box(modifier.tile(Graphite)) {
+        // Date and seconds along the top; the time is centred in the whole tile.
+        Box(Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 22.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(now.format(farDateFormat), color = Soft, fontSize = 26.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(now.format(secondsFormat), color = Tangerine, fontSize = 36.sp, fontWeight = FontWeight.Medium)
+            }
+            Text(now.format(clockFormat), Modifier.align(Alignment.CenterStart), fontSize = 140.sp,
+                fontWeight = FontWeight.ExtraLight, letterSpacing = (-6).sp, lineHeight = 140.sp, maxLines = 1,
+                softWrap = false)
+        }
+        val progress = (now.second + 1) / 60f
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress).height(4.dp)
+            .background(Brush.horizontalGradient(listOf(Tangerine.copy(alpha = 0.2f), Tangerine))))
+    }
+}
+
+/** Weather reduced to what reads at a distance: icon, temperature, condition, high and low. */
+@Composable
+private fun FarWeatherTile(weather: Weather?, error: String?, now: LocalDateTime, modifier: Modifier) {
+    Column(modifier.tile(sky(now, weather)).padding(horizontal = 22.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.Center) {
+        if (weather == null) {
+            Text(if (error != null) "Weather unavailable" else "Loading weather…", fontSize = 20.sp)
+            return@Column
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            WeatherIcon(weather.code, weather.isDay, Modifier.size(64.dp))
+            Spacer(Modifier.width(14.dp))
+            Text(weather.tempC.deg(), fontSize = 76.sp, fontWeight = FontWeight.Light, letterSpacing = (-3).sp,
+                lineHeight = 78.sp, maxLines = 1, softWrap = false)
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(condition(weather.code), fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+            overflow = TextOverflow.Ellipsis)
+        Text("H ${weather.highC.deg()}  L ${weather.lowC.deg()}", fontSize = 36.sp, fontWeight = FontWeight.Medium,
+            color = Ink.copy(alpha = 0.85f), maxLines = 1)
+    }
+}
+
+/** The next timed event as one large line, under the weather. */
+@Composable
+private fun NextStrip(next: Event, now: LocalDateTime, modifier: Modifier) {
+    val zone = ZoneId.systemDefault()
+    val nowMs = now.atZone(zone).toInstant().toEpochMilli()
+    val begin = Instant.ofEpochMilli(next.begin).atZone(zone)
+    val `when` = when {
+        nowMs >= next.begin -> "Now · until ${Instant.ofEpochMilli(next.end).atZone(zone).format(clockFormat)}"
+        begin.toLocalDate() != now.toLocalDate() -> "Tomorrow · ${begin.format(clockFormat)}"
+        next.begin - nowMs < 3 * 3600_000 -> "In ${relative(nowMs, next.begin)}"
+        else -> "Today · ${begin.format(clockFormat)}"
+    }
+    Column(modifier.tile(VioletTile).padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.Center) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(12.dp).clip(CircleShape).background(if (next.color != 0) Color(next.color) else Accent))
+            Spacer(Modifier.width(10.dp))
+            Text(`when`, color = Lilac, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                overflow = TextOverflow.Ellipsis)
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(next.title, fontSize = 30.sp, fontWeight = FontWeight.SemiBold, lineHeight = 33.sp, maxLines = 2,
+            overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** A short pill confirming a gesture, so a missed one is obvious. It drops in, holds, and fades. */
+@Composable
+private fun GestureToast(toast: Toast?, modifier: Modifier) {
+    var shown by remember { mutableStateOf<Toast?>(null) }
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(toast) {
+        if (toast == null || System.currentTimeMillis() - toast.at > 2000) return@LaunchedEffect
+        shown = toast
+        visible = true
+        delay(1400)
+        visible = false
+    }
+    AnimatedVisibility(visible, modifier,
+        enter = fadeIn(tween(180)) + scaleIn(tween(220), initialScale = 0.85f),
+        exit = fadeOut(tween(400)) + scaleOut(tween(400), targetScale = 0.95f)) {
+        val t = shown ?: return@AnimatedVisibility
+        Row(Modifier.clip(RoundedCornerShape(50)).background(Color(0xE61E1F26))
+            .border(1.dp, GlassEdge, RoundedCornerShape(50)).padding(horizontal = 22.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            ToastGlyph(t.kind, Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(t.text, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+/** Media glyphs drawn in code; the core icon set has only play. */
+@Composable
+private fun ToastGlyph(kind: String, modifier: Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        fun triangle(left: Float, right: Float, pointRight: Boolean) = Path().apply {
+            if (pointRight) { moveTo(left, 0f); lineTo(right, h / 2); lineTo(left, h) }
+            else { moveTo(right, 0f); lineTo(left, h / 2); lineTo(right, h) }
+            close()
+        }
+        val bar = w * 0.16f
+        when (kind) {
+            "play" -> drawPath(triangle(w * 0.15f, w * 0.95f, true), Mint)
+            "pause" -> {
+                drawRoundRect(Tangerine, Offset(w * 0.18f, 0f), androidx.compose.ui.geometry.Size(w * 0.22f, h),
+                    androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+                drawRoundRect(Tangerine, Offset(w * 0.60f, 0f), androidx.compose.ui.geometry.Size(w * 0.22f, h),
+                    androidx.compose.ui.geometry.CornerRadius(2.dp.toPx()))
+            }
+            "next" -> {
+                drawPath(triangle(0f, w - bar * 1.4f, true), Lilac)
+                drawRect(Lilac, Offset(w - bar, 0f), androidx.compose.ui.geometry.Size(bar, h))
+            }
+            "previous" -> {
+                drawRect(Lilac, Offset(0f, 0f), androidx.compose.ui.geometry.Size(bar, h))
+                drawPath(triangle(bar * 1.4f, w, false), Lilac)
+            }
+            else -> drawRoundRect(Red, Offset(w * 0.1f, h * 0.1f), androidx.compose.ui.geometry.Size(w * 0.8f, h * 0.8f),
+                androidx.compose.ui.geometry.CornerRadius(3.dp.toPx()))
         }
     }
 }
@@ -169,9 +452,11 @@ private fun ClockTile(now: LocalDateTime, modifier: Modifier) {
                 Spacer(Modifier.weight(1f))
                 Text(now.format(secondsFormat), color = Tangerine, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             }
-            Spacer(Modifier.weight(1f))
-            Text(now.format(clockFormat), fontSize = 88.sp, fontWeight = FontWeight.ExtraLight,
-                letterSpacing = (-4).sp, lineHeight = 88.sp, maxLines = 1, softWrap = false)
+            // Centred in the space under the date line.
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+                Text(now.format(clockFormat), fontSize = 88.sp, fontWeight = FontWeight.ExtraLight,
+                    letterSpacing = (-4).sp, lineHeight = 88.sp, maxLines = 1, softWrap = false)
+            }
         }
         // Step once a second with the clock. A tween here restarted every second and kept the
         // Echo rendering at 60 fps all day, starving its Bluetooth speaker of CPU.
@@ -276,8 +561,9 @@ private fun relative(fromMs: Long, toMs: Long): String {
 }
 
 @Composable
-private fun AgendaCard(allEvents: List<Event>, allowed: Boolean, now: LocalDateTime, onAllow: () -> Unit) {
-    Column(Modifier.fillMaxSize().tile(VioletTile).padding(horizontal = 22.dp, vertical = 18.dp)) {
+private fun AgendaCard(allEvents: List<Event>, allowed: Boolean, now: LocalDateTime, onAllow: () -> Unit,
+                       modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxSize().tile(VioletTile).padding(horizontal = 22.dp, vertical = 18.dp)) {
         if (!allowed) {
             Label("Calendar")
             Spacer(Modifier.height(12.dp))
@@ -357,7 +643,7 @@ private fun AgendaCard(allEvents: List<Event>, allowed: Boolean, now: LocalDateT
 }
 
 @Composable
-private fun ConversationCard(state: Dashboard, now: LocalDateTime) {
+private fun ConversationCard(state: Dashboard, now: LocalDateTime, modifier: Modifier = Modifier) {
     val nowMs = now.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
     val cancellable = state.status in listOf("confirming", "waiting")
     val (title, color) = when (state.status) {
@@ -371,7 +657,7 @@ private fun ConversationCard(state: Dashboard, now: LocalDateTime) {
         "speaking" -> "Speaking" to Mint
         else -> "Done" to Soft
     }
-    Column(Modifier.fillMaxSize().tile(if (cancellable) AmberTile else TealTile)
+    Column(modifier.fillMaxSize().tile(if (cancellable) AmberTile else TealTile)
         .then(if (cancellable) Modifier.clickable { VoiceService.cancelRequest() } else Modifier)
         .padding(22.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {

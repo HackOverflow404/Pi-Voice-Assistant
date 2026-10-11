@@ -21,8 +21,16 @@ data class Dashboard(
     /** Events the Pi reads from the configured iCal links; null until it sends any. */
     val calendar: List<Event>? = null,
     /** Timers and the stopwatch; the Pi keeps them, the dashboard shows them. */
-    val clockItems: List<ClockItem> = emptyList()
+    val clockItems: List<ClockItem> = emptyList(),
+    /** How close someone is, from the Pi's camera service: "near", "far", "away", or "unknown"
+     *  when it isn't running or can't see (the dashboard then shows its full layout). */
+    val zone: String = "unknown",
+    /** The last hand gesture acted on, shown briefly as a pill; null until there is one. */
+    val toast: Toast? = null
 )
+
+/** Feedback for a gesture: `kind` picks the glyph ("pause", "play", "next", "previous", "stop"). */
+data class Toast(val text: String, val kind: String, val at: Long = System.currentTimeMillis())
 
 /** A timer or the stopwatch as the Pi last reported it; the dashboard counts on from there. */
 data class ClockItem(
@@ -72,6 +80,8 @@ object State {
             double("load1"), if (json.has("uptime_s")) json.optLong("uptime_s") else null, double("temp_c"),
             double("cpu_percent"), double("mem_percent")))
     }
+    fun zone(value: String) = mutable.update { it.copy(zone = value) }
+    fun toast(text: String, kind: String) = mutable.update { it.copy(toast = Toast(text, kind)) }
     fun event(json: JSONObject) = mutable.update {
         val status = json.optString("status", "idle")
         it.copy(status = status, sendDelay = json.optInt("send_delay", 0),

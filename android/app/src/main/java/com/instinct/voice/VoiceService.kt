@@ -248,6 +248,21 @@ class VoiceService : Service() {
                                 check(ws.send(JSONObject().put("type", "media_volume_state")
                                     .put("level", level.toDouble()).toString()))
                             }
+                            "presence" -> {
+                                val zone = json.optString("zone", "unknown")
+                                val previous = State.flow.value.zone
+                                State.zone(zone)
+                                Media.zone(this@VoiceService, previous, zone)
+                            }
+                            // The Pi has already stopped speech or a ringing timer itself; media
+                            // actions happen here, where the playback state is known.
+                            "gesture" -> when (json.optString("action")) {
+                                "toggle" -> Media.toggle(this@VoiceService)
+                                "next" -> Media.next(this@VoiceService)
+                                "previous" -> Media.previous(this@VoiceService)
+                                "stop" -> State.toast("Stopped", "stop")
+                                "dismiss" -> State.toast("Dismissed", "stop")
+                            }
                             "system" -> State.system(json)
                             "calendar" -> State.calendar(json)
                             "timers" -> {

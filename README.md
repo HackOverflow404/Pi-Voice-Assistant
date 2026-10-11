@@ -243,7 +243,15 @@ synced on the Echo (cancelled and declined events hidden); and a status bar with
 voice state and Pi health (hottest temperature sensor, CPU and RAM use), which the server sends
 every 30 seconds. While the assistant is listening, waiting or speaking, a conversation
 card replaces the calendar and stays for 20 seconds after the reply. The background
-follows sunrise and sunset. The app never dims the screen. A long press
+follows sunrise and sunset.
+
+With the camera service [echo-presence](presence/) running on the Pi, the layout
+follows how close someone is: from across the room the tiles glide into a large clock, the
+weather and the next event, and they glide back when you walk up. With nobody there for 90 s
+playing music pauses, and coming back resumes it (only if it was paused for that reason). The
+screen always stays at full brightness. The morph changes only layer transforms, never layout,
+since the Echo's CPU can't re-measure the dashboard every frame. Without echo-presence (or with
+no video) the full dashboard shows. A long press
 anywhere opens the connection settings with Start/Stop. Text uses the bundled Inter typeface (SIL Open Font License;
 `android/app/src/main/assets/licenses/Inter-OFL.txt`); weather icons are drawn in code. Events come from the private
 iCal links in `calendar.ical_urls` on the Pi: the server expands recurring events

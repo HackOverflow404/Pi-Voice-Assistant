@@ -83,6 +83,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Always full brightness, whoever is (or isn't) in the room.
+        window.attributes = window.attributes.apply {
+            screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val settings = Settings(this)
         handleStart(intent, afterFirstFrame = true)
