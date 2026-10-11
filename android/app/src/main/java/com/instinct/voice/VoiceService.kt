@@ -8,6 +8,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.media.*
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -20,6 +22,7 @@ import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URI
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
@@ -41,6 +44,9 @@ class VoiceService : Service() {
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).build()
     private var runner: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLocks = emptyList<WifiManager.WifiLock>()
+    // Set once the current socket opens, so a dead USB tunnel can fall back to Wi-Fi at once.
+    @Volatile private var opened = false
     @Volatile private var socket: WebSocket? = null
     @Volatile private var muted = true
     // Ends the sentence playing now; set by play() while a MediaPlayer is running.
@@ -131,20 +137,29 @@ class VoiceService : Service() {
         if (runner?.isActive != true) {
             wakeLock = getSystemService(PowerManager::class.java)
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiVoice:microphone").apply { acquire() }
+            wifiLocks = holdWifi()
             State.running(true)
             runner = scope.launch {
                 var backoff = 1000L
+                var viaUsb = true
                 while (isActive) {
                     State.connection("Connecting")
                     val connectedAt = System.currentTimeMillis()
+                    val configured = Settings(this@VoiceService).url
+                    val url = if (viaUsb) usbUrl(configured) else configured
+                    opened = false
                     try {
-                        connect()
+                        connect(url)
                     } catch (cancel: CancellationException) {
                         throw cancel
                     } catch (error: Exception) {
                         android.util.Log.w("VoiceService", "Connection lost: ${error.javaClass.simpleName}: ${error.message}")
                         State.connection("Reconnecting", error.message ?: "Connection interrupted")
                     }
+                    // No tunnel (adb reverse not set up yet): try the configured Wi-Fi URL now,
+                    // then go back to preferring USB on the next attempt.
+                    if (viaUsb && !opened && url != configured) { viaUsb = false; continue }
+                    viaUsb = true
                     if (System.currentTimeMillis() - connectedAt > 30000) backoff = 1000
                     delay(backoff)
                     backoff = (backoff * 2).coerceAtMost(30000)
@@ -154,7 +169,26 @@ class VoiceService : Service() {
         return START_STICKY
     }
 
-    private suspend fun connect() = coroutineScope {
+    /** The configured URL with its host swapped for the Echo's loopback, which the Pi maps over
+     *  USB with `adb reverse`, so the link to the Pi doesn't depend on the Echo's Wi-Fi. */
+    private fun usbUrl(configured: String): String = runCatching {
+        URI(configured).let { URI(it.scheme, it.userInfo, "127.0.0.1", it.port, it.path, it.query, it.fragment) }
+            .toString()
+    }.getOrDefault(configured)
+
+    /** Keep the radio out of power save: after a background scan the Echo's driver can stay
+     *  dozing, the router buffers its traffic, ARP to the gateway fails and Android drops Wi-Fi. */
+    @Suppress("DEPRECATION")
+    private fun holdWifi(): List<WifiManager.WifiLock> {
+        val wifi = applicationContext.getSystemService(WifiManager::class.java) ?: return emptyList()
+        val modes = listOf(WifiManager.WIFI_MODE_FULL_HIGH_PERF) +
+            if (Build.VERSION.SDK_INT >= 29) listOf(WifiManager.WIFI_MODE_FULL_LOW_LATENCY) else emptyList()
+        return modes.map { mode ->
+            wifi.createWifiLock(mode, "PiVoice:wifi$mode").apply { setReferenceCounted(false); acquire() }
+        }
+    }
+
+    private suspend fun connect(url: String) = coroutineScope {
         val settings = Settings(this@VoiceService)
         val incoming = Channel<Incoming>(64)
         val listener = object : WebSocketListener() {
@@ -177,7 +211,7 @@ class VoiceService : Service() {
             override fun onClosed(ws: WebSocket, code: Int, reason: String) { incoming.close() }
         }
         muted = true
-        val ws = client.newWebSocket(Request.Builder().url(settings.url)
+        val ws = client.newWebSocket(Request.Builder().url(url)
             .header("Authorization", "Bearer ${settings.token}").build(), listener)
         socket = ws
         var mic: Job? = null
@@ -220,6 +254,8 @@ class VoiceService : Service() {
             for (event in incoming) {
                 when (event) {
                     Incoming.Open -> {
+                        opened = true
+                        android.util.Log.i("VoiceService", "Connected to $url")
                         State.connection("Connected")
                         mic = launch { record(ws) }
                     }
@@ -385,6 +421,7 @@ class VoiceService : Service() {
         scope.cancel()
         runner?.invokeOnCompletion {
             wakeLock?.let { if (it.isHeld) it.release() }
+            wifiLocks.forEach { if (it.isHeld) it.release() }
             client.dispatcher.executorService.shutdown()
             client.connectionPool.evictAll()
         }

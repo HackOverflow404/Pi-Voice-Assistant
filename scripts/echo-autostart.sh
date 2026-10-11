@@ -7,6 +7,10 @@ pkg=com.instinct.voice
 # adb shell reads stdin by default; never let it.
 adb() { command adb "$@" </dev/null; }
 [[ $(adb get-state 2>/dev/null) == device ]] || exit 0
+# The app reaches the server at the Echo's 127.0.0.1 over USB first (Wi-Fi is the fallback).
+# The reverse is lost whenever the Echo reboots, USB re-enumerates or the adb server restarts.
+port=${VOICE_PORT:-8765}
+adb reverse --list | grep -q "tcp:$port tcp:$port" || adb reverse "tcp:$port" "tcp:$port"
 [[ $(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]] || exit 0
 adb shell dumpsys activity services "$pkg" | grep -q "ServiceRecord.*$pkg/.VoiceService" && exit 0
 # Only resume a service the user started; Stop in the app clears this flag. A non-debuggable
