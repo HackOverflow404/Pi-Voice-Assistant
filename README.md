@@ -220,7 +220,11 @@ If using project-local tools, the script recognizes `.tools/jdk` and
 `.tools/android-sdk`. Gradle caches and the debug signing key are kept under
 `.tools/`. Keep that signing key if you want subsequent `adb install -r` builds
 to update the same installation. The output is a debug-signed, test-only sideload APK,
-not a Play Store release. `lintDebug` runs as part of the build.
+not a Play Store release. `lintDebug` runs as part of the build. The build is not debuggable:
+ART runs debuggable apps with reduced optimisation, which made the dashboard's animations
+choppy on the Echo. So `run-as com.instinct.voice` doesn't work; the app mirrors its
+"enabled" flag to `/sdcard/Android/data/com.instinct.voice/files/enabled`, which
+`scripts/echo-autostart.sh` reads instead.
 
 **Do not build on the Pi.** Gradle and lint exhaust a 2 GB Pi and leave it
 unresponsive, so `build-apk.sh` refuses to run on ARM or on hosts with less than 4 GB

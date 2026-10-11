@@ -92,7 +92,7 @@ object State {
     }
 }
 
-class Settings(context: Context) {
+class Settings(private val context: Context) {
     private val prefs = context.getSharedPreferences("connection", Context.MODE_PRIVATE)
     var url: String
         get() = prefs.getString("url", "ws://raspberrypi.local:8765")!!
@@ -102,7 +102,16 @@ class Settings(context: Context) {
         set(value) { prefs.edit().putString("token", value).apply() }
     var enabled: Boolean
         get() = prefs.getBoolean("enabled", false)
-        set(value) { prefs.edit().putBoolean("enabled", value).apply() }
+        set(value) {
+            prefs.edit().putBoolean("enabled", value).apply()
+            exportEnabled()
+        }
+
+    /** The app isn't debuggable (for speed), so the Pi's autostart can't `run-as` to read the
+     *  preference; it reads this copy in the app's external files directory over adb instead. */
+    fun exportEnabled() {
+        runCatching { context.getExternalFilesDir(null)?.resolve("enabled")?.writeText(enabled.toString()) }
+    }
     /** Media volume the service holds, 0-1 of the stream's range; set by voice commands. */
     var mediaVolume: Float
         get() = prefs.getFloat("media_volume", 1f)

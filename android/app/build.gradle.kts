@@ -15,6 +15,12 @@ android {
         versionCode = 1
         versionName = "1.0"
     }
+    buildTypes {
+        // Still signed with the debug key so it installs over existing copies, but not debuggable:
+        // ART runs debuggable apps with reduced optimisation, which made Compose animations on the
+        // Echo's slow CPU visibly choppy.
+        debug { isDebuggable = false }
+    }
     buildFeatures { compose = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

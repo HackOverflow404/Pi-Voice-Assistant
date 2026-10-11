@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
         }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val settings = Settings(this)
+        settings.exportEnabled()  // for the Pi's autostart check, including after an update
         handleStart(intent, afterFirstFrame = true)
         calendarAllowed = Glance.canReadCalendar(this)
         setContent {
