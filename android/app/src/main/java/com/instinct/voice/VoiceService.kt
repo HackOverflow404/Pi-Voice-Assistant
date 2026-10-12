@@ -285,10 +285,7 @@ class VoiceService : Service() {
                                     .put("level", level.toDouble()).toString()))
                             }
                             "presence" -> {
-                                val zone = json.optString("zone", "unknown")
-                                val previous = State.flow.value.zone
-                                State.zone(zone)
-                                Media.zone(this@VoiceService, previous, zone)
+                                State.zone(json.optString("zone", "unknown"))
                             }
                             // The Pi has already stopped speech or a ringing timer itself; media
                             // actions happen here, where the playback state is known.

@@ -15,9 +15,8 @@ Echo camera → SECUR-T hub (localhost:7002, H.264) → ffmpeg → MediaPipe on 
 |---|---|
 | `near` | Full dashboard (clock, weather curve, agenda, voice and Pi tiles) |
 | `far` | Tiles glide into a large clock, the weather and the next event |
-| `away` (nobody for 90 s) | Far layout; music pauses (the screen stays at full brightness) |
-| back from `away` | Music resumes, but only if leaving paused it |
-| `unknown` (service down, no video) | Full dashboard; nothing paused or resumed |
+| `away` (nobody for 90 s) | Far layout (the screen stays at full brightness) |
+| `unknown` (service down, no video) | Full dashboard |
 
 ## How presence is decided (`logic.py`)
 
