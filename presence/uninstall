@@ -16,5 +16,5 @@ clear clippy/vision/availability
 clear homeassistant/sensor/echo_presence_zone/config
 clear homeassistant/binary_sensor/echo_occupancy/config
 clear homeassistant/event/echo_gesture/config
-rm -rf ~/.local/share/echo-presence
+rm -rf ~/.local/share/echo-presence  # includes faceauth/ (signing key, enrolled face)
 REMOTE

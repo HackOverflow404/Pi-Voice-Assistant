@@ -8,6 +8,8 @@ publishes over MQTT, where Clippy's voice server relays it to the Echo's dashboa
   clippy/vision/gesture                 {"gesture": "palm"|"next"|"previous", "event_type": ..., "at": epoch}
   clippy/vision/availability  retained  online | offline (last will)
 
+It also answers echo-unlock's face checks from the laptop (faceauth.py, `[faceauth]`).
+
 Presence runs face detection a few times a second, plus a person detector every couple of
 seconds while no face is visible (someone facing away). Hands are off by default: a Pi 4
 can't track them fast enough next to Clippy and Home Assistant (see README).
@@ -25,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+import faceauth
 from logic import GestureConfig, Gestures, Hand, ZoneConfig, ZoneTracker
 
 LOG = logging.getLogger('presence')
@@ -169,7 +172,9 @@ class Publisher:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='echo-presence')
         self.client.will_set(f'{BASE}/availability', 'offline', retain=True)
         self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
         self.zone = None
+        self.handlers = {}
         self.client.connect_async(config.get('host', '127.0.0.1'), config.get('port', 1883), keepalive=30)
         self.client.loop_start()
 
@@ -194,7 +199,22 @@ class Publisher:
         client.publish(f'{BASE}/availability', 'online', retain=True)
         if self.zone:
             self.presence(self.zone)
+        for topic in self.handlers:
+            client.subscribe(topic)
         LOG.info('MQTT connected')
+
+    def _on_message(self, client, userdata, msg):
+        handler = self.handlers.get(msg.topic)
+        if handler:
+            handler(msg.payload)
+
+    def subscribe(self, topic, handler):
+        self.handlers[topic] = handler
+        if self.client.is_connected():
+            self.client.subscribe(topic)
+
+    def publish(self, topic, payload):
+        self.client.publish(topic, payload)
 
     def presence(self, zone):
         self.zone = zone
@@ -225,6 +245,7 @@ def run(config, debug=False):
     logging.root.setLevel(logging.INFO)  # importing MediaPipe (absl) lowers it to WARNING
     pub = Publisher(config.get('mqtt', {}))
     zones = ZoneTracker(ZoneConfig(**cfg_p.get('zones', {})), time.monotonic())
+    auth = faceauth.load(config.get('faceauth', {}), Path(config.get('models', {}).get('dir', HERE / 'models')), pub)
     gestures = Gestures(GestureConfig(**cfg_h.get('gestures', {}))) if hands_on else None
     face_every = 1 / cfg_p.get('face_hz', 5)
     person_every = cfg_p.get('person_every', 1.5)
@@ -290,6 +311,10 @@ def run(config, debug=False):
             if zone:
                 LOG.info('Zone: %s', zone)
                 pub.presence(zone)
+
+        # A face check the laptop asked for, only while one is open (~0.2 s CPU per check).
+        if auth and auth.due(now):
+            auth.step(now, arr, zones.zone == 'near')
 
         # Hands only while someone is here; MediaPipe tracks between frames, so run every frame.
         if gestures and zones.zone in ('near', 'far') and now >= next_hands:

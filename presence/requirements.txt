@@ -3,3 +3,4 @@
 mediapipe==0.10.18
 numpy<2
 paho-mqtt>=2,<3
+cryptography>=42

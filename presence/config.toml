@@ -39,3 +39,12 @@ max_fps = 15
 
 [hands.gestures]
 swipe_left_is = "next"          # a swipe toward your own left skips forward
+
+[faceauth]
+# Answers echo-unlock's challenges from the laptop (see README, "Face unlock"). Enroll first:
+# .venv/bin/python faceauth.py enroll
+enabled = true
+threshold = 0.6                 # SFace cosine similarity; owner ~0.78 at the desk (2026-10-13), strangers <0.4
+matches = 2                     # consecutive matching checks needed
+window = 6.0                    # seconds each challenge stays open
+hz = 3                          # checks per second while one is open (~0.2 s CPU each)

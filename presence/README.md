@@ -74,12 +74,36 @@ the current MediaPipe, set `enabled = true`, and run `./install`.
 The server's palm handling comes first: a ringing timer is dismissed, then Clippy talking (or
 about to send) is stopped, and otherwise music toggles. A request already sent is never unsent.
 
+## Face unlock (`faceauth.py`)
+
+echo-unlock on the laptop (`~/Documents/Projects/claude/echo-unlock`) unlocks it when you sit
+down at the desk. When presence turns `near` it publishes a one-time challenge
+(`clippy/faceauth/challenge`). For the next 6 s, this service runs OpenCV's YuNet face detector
+(at 320x180, ~37 ms) and SFace recognizer (~175 ms) on the newest frames, 3 times a second. It
+answers on `clippy/faceauth/verdict`. A match needs 2 consecutive checks where the largest face
+scores at least `threshold` against the enrolled samples while the zone is `near`. Only matches
+are signed (Ed25519, `faceauth/ed25519.pem`, created by `install`). The signature covers the
+laptop's hostname, the nonce and the time. Nothing runs between challenges.
+
+```sh
+cd ~/.local/share/echo-presence
+.venv/bin/python faceauth.py enroll   # ~30 s at the desk, turning your head a little
+.venv/bin/python faceauth.py test     # live scores, for choosing [faceauth] threshold
+systemctl --user restart echo-presence
+.venv/bin/python faceauth.py pubkey   # what the laptop pins (echo-unlock/install fetches it)
+```
+
+The models (`face_detection_yunet_2023mar.onnx`, `face_recognition_sface_2021dec.onnx`) come
+from OpenCV Zoo and are checksummed by `install`. `faceauth/` (the key and the enrolled samples)
+is only on the Pi and is never copied off it. Set `[faceauth] enabled = false` to stop answering.
+
 ## Files
 
 - `presence.py`: stream reader (newest frame only), models, MQTT and Home Assistant discovery
   (`sensor.presence`, `binary_sensor.someone_at_the_echo`, `event.gesture` on the Clippy device)
 - `logic.py`: zone hysteresis and gesture state machines, with no MediaPipe or I/O
-- `tests/test_logic.py`: `python3 -m unittest discover -s tests`
+- `faceauth.py`: face verification for echo-unlock (challenges, YuNet + SFace, signing, enroll CLI)
+- `tests/`: `python3 -m unittest discover -s tests`
 - `config.toml`: defaults, copied to the Pi on first install only
 - `systemd/echo-presence.service`: user unit with Nice=10 and CPUWeight=30, so Clippy and Home
   Assistant win any CPU contention
