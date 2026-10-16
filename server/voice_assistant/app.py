@@ -1,6 +1,7 @@
 import argparse
 import datetime as dt
 import asyncio
+import io
 import re
 from collections import deque
 from contextlib import suppress
@@ -10,6 +11,7 @@ import logging
 from pathlib import Path
 import signal
 import ssl
+import subprocess
 import threading
 import time
 import uuid
@@ -21,7 +23,7 @@ from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_t
 from .speech import chunks, speakable
 from .sms import GoogleVoice
 from .store import Store
-from .whatsapp import WhatsApp
+from .whatsapp import Reply, WhatsApp
 
 LOG = logging.getLogger('voice')
 
@@ -56,6 +58,10 @@ def load_config(path):
         raise ValueError(f'Invalid {messenger} contact, timeouts or reply length')
     if messenger == 'whatsapp' and not w.get('bridge_url'):
         raise ValueError('Set whatsapp.bridge_url')
+    if messenger == 'whatsapp':
+        w.setdefault('voice_window_seconds', 600)
+        if not 0 <= w['voice_window_seconds'] <= 3600:
+            raise ValueError('whatsapp.voice_window_seconds must be 0-3600')
     if messenger == 'sms':
         for key, value in dict(imap_host='imap.gmail.com', smtp_host='smtp.gmail.com', mailbox='INBOX',
                                poll_seconds=3, stale_minutes=60, reply_address='').items():
@@ -123,6 +129,22 @@ def load_config(path):
 def canonical_emoji(text):
     """Emoji without skin-tone modifiers or variation selectors, so 👍🏽 matches 👍."""
     return re.sub('[\U0001F3FB-\U0001F3FF\uFE0E\uFE0F]', '', text or '')
+
+
+VOICE_REPLY = 'Voice message'  # shown on the Echo (and stored) for a reply that was a voice note
+
+
+def voice_wav(data):
+    """A WhatsApp voice note (OGG/Opus) as a mono WAV the Echo can play, and its length."""
+    rate = 24000
+    pcm = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-i', 'pipe:0',
+                          '-ac', '1', '-ar', str(rate), '-f', 's16le', 'pipe:1'],
+                         input=data, capture_output=True, check=True, timeout=60).stdout
+    output = io.BytesIO()
+    with wave.open(output, 'wb') as wav:
+        wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(rate)
+        wav.writeframes(pcm)
+    return output.getvalue(), len(pcm) / 2 / rate
 
 
 class NoReply(Exception):
@@ -223,6 +245,7 @@ class Session:
         self.cancel = asyncio.Event()
         self.abort = threading.Event()
         self.volume_reply = None  # the Echo's answer to a media volume change
+        self.voice_inbox = []  # voice notes from the contact waiting to be played (message IDs)
         self.pairing_timer = None
 
     async def event(self, **payload):
@@ -311,6 +334,72 @@ class Session:
         if audio_id is None:
             self.store.update(self.message_id, 'done')
 
+    async def play_voice(self, message_ids, audio_id=None):
+        """Play the contact's voice notes in order, each as one WAV. Each is marked played before
+        it starts, so an interrupted one isn't played again. Like speak(), no audio_id means the
+        reply to the current request, which is recorded as done afterwards."""
+        await self.set_status('speaking')
+        self.playback_id = audio_id or self.message_id
+        self.playback_error = False
+        self.played.clear()
+        clips = []
+        for message_id in message_ids:
+            self.store.mark_voice(message_id)
+            try:
+                data = await self.blocking(self.messenger.media, message_id)
+                clips.append(await self.blocking(voice_wav, data))
+            except Exception as exc:  # expired media, bridge restarted: skip that one
+                LOG.warning('Voice note %s unavailable: %s', message_id, exc)
+        if not clips:
+            raise RuntimeError('No playable voice notes')
+        LOG.info('Playing %d voice notes (%.0f s)', len(clips), sum(d for _, d in clips))
+        for seq, (wav, duration) in enumerate(clips):
+            await asyncio.shield(asyncio.create_task(
+                self.transfer(self.playback_id, seq, seq == len(clips) - 1, wav, duration)))
+        await asyncio.wait_for(self.played.wait(), timeout=sum(d for _, d in clips) + 30)
+        if self.playback_error:
+            raise RuntimeError('Client could not play the voice notes')
+        self.playback_id = None
+        if audio_id is None:
+            self.store.update(self.message_id, 'done')
+
+    async def read_voice(self, message_ids):
+        """Play voice notes the contact sent within voice_window_seconds of the last request,
+        other than the reply itself (already played)."""
+        fresh = [m for m in message_ids if not self.store.voice_played(m)]
+        if not fresh:
+            return
+        self.reply, self.error = VOICE_REPLY, None
+        try:
+            await self.play_voice(fresh, audio_id=f'voice-{uuid.uuid4().hex[:8]}')
+        except Exception as exc:
+            LOG.warning('Playing voice notes failed: %s', type(exc).__name__)
+        await self.set_status('idle')
+
+    async def watch_voice(self):
+        """While the last request is under voice_window_seconds old, collect every voice note the
+        contact sends (not only replies) for the idle loop to play."""
+        after = 0
+        while True:
+            latest = self.store.latest()
+            window = self.chat.get('voice_window_seconds', 0)
+            if not latest or time.time() >= latest['created'] + window:
+                await asyncio.sleep(5)
+                continue
+            try:
+                found, seq = await asyncio.to_thread(self.messenger.voice, latest['created'] - 5, after, 10)
+            except (OSError, RuntimeError):
+                await asyncio.sleep(3)  # bridge restarting: try again
+                continue
+            if seq < after:
+                after = 0  # the bridge restarted and numbers from 1 again
+                continue
+            for message in found:
+                after = max(after, message['seq'])
+                if (message['timestamp'] <= latest['created'] + window and message['id'] not in self.voice_inbox
+                        and not self.store.voice_played(message['id'])):
+                    self.voice_inbox.append(message['id'])
+
     async def transfer(self, *args):
         async with self.audio_lock:
             await self.send_wav(*args)
@@ -372,6 +461,14 @@ class Session:
             if self.abort.is_set() and not self.stop.is_set():
                 raise Cancelled from exc
             raise
+        if isinstance(raw, Reply):  # voice notes: play them, then any text that came with them
+            text = speakable(raw.text)[:w['max_reply_chars']]
+            self.reply = text or VOICE_REPLY
+            self.store.update(self.message_id, 'replied', self.reply)
+            await self.play_voice(raw.voice, audio_id=f'voice-{uuid.uuid4().hex[:8]}' if text else None)
+            if text:
+                await self.speak(text)
+            return
         self.reply = speakable(raw)[:w['max_reply_chars']]
         self.store.update(self.message_id, 'replied', self.reply)
         await self.speak(self.reply)
@@ -390,6 +487,8 @@ class Session:
             # A crash between sending and commit is ambiguous. Keep watching for the reply;
             # never resend automatically, which could cause duplicate external actions.
             await self.wait_and_speak(latest['created'])
+        elif latest['status'] == 'replied' and self.reply == VOICE_REPLY:
+            self.store.update(self.message_id, 'done')  # the voice note was already marked played
         elif latest['status'] == 'replied':
             await self.speak(self.reply)
 
@@ -469,6 +568,9 @@ class Session:
                 text = self.messenger.unread()
                 if text:
                     self.job = asyncio.create_task(self.read_message(text))
+                elif self.voice_inbox:
+                    voice, self.voice_inbox = self.voice_inbox, []
+                    self.job = asyncio.create_task(self.read_voice(voice))
 
     async def interrupt(self):
         """A wake word while busy: drop the request or text in progress and silence the Echo.
@@ -815,6 +917,8 @@ class Session:
         processor = asyncio.create_task(self.process())
         telemetry = asyncio.create_task(self.telemetry())
         probe = asyncio.create_task(self.report_speaker_volume()) if self.hub else None
+        # WhatsApp only: SMS can't carry voice notes.
+        voice = asyncio.create_task(self.watch_voice()) if hasattr(self.messenger, 'voice') else None
         try:
             done, _ = await asyncio.wait([receiver, processor], return_when=asyncio.FIRST_COMPLETED)
             for task in done:
@@ -831,9 +935,12 @@ class Session:
             telemetry.cancel()
             if probe:
                 probe.cancel()
+            if voice:
+                voice.cancel()
             if job:
                 job.cancel()
-            await asyncio.gather(receiver, processor, telemetry, *([job] if job else []), return_exceptions=True)
+            await asyncio.gather(receiver, processor, telemetry, *([voice] if voice else []), *([job] if job else []),
+                                 return_exceptions=True)
 
 
 async def serve(config, engines):

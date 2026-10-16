@@ -8,6 +8,8 @@
 //	POST /send     {"contact": "Instinct", "text"} -> {"id", "timestamp"}
 //	GET  /replies?contact=&request=&since=&after=&wait=
 //	                                              -> {"messages": [...]} the contact's replies to message `request`
+//	GET  /voice?contact=&since=&after=&wait=      -> {"messages": [...], "seq"} the contact's voice notes since `since`
+//	GET  /media?id=                               -> one received voice note's audio (OGG/Opus)
 //	GET  /chat?contact=                           -> recent messages in that chat, both directions (for setup)
 //	POST /revoke   {"contact", "id"}              -> delete one of our messages for everyone
 //	GET  /contacts?q=                             -> contacts whose names contain q (for setup)
@@ -57,9 +59,11 @@ type message struct {
 	Timestamp int64  `json:"timestamp"`
 	Text      string `json:"text"`
 	FromMe    bool   `json:"from_me"`
-	Quoted    string `json:"quoted,omitempty"` // ID of the message this one replies to, if quoted
+	Quoted    string `json:"quoted,omitempty"`   // ID of the message this one replies to, if quoted
 	Reaction  string `json:"reaction,omitempty"` // emoji, for a reaction to message Target
 	Target    string `json:"target,omitempty"`
+	Audio     bool   `json:"audio,omitempty"`   // a voice note or audio file; fetch it from /media
+	Seconds   uint32 `json:"seconds,omitempty"` // its length, as WhatsApp reports it
 	users     []string
 }
 
@@ -90,6 +94,9 @@ func (b *bridge) record(m message) {
 	m.Seq = b.seq
 	b.messages = append(b.messages, m)
 	if len(b.messages) > 500 {
+		for _, old := range b.messages[:len(b.messages)-500] {
+			delete(b.audio, old.ID)
+		}
 		b.messages = b.messages[len(b.messages)-500:]
 	}
 	close(b.changed)
@@ -130,7 +137,7 @@ func (b *bridge) repliesTo(c *contact, request string, since, after int64) []mes
 	}
 	quotedOnly := known && begin > 0 && chat[begin-1].FromMe &&
 		chat[begin].Timestamp-chat[begin-1].Timestamp < 600
-	var found []message
+	found := []message{} // [] rather than null in JSON
 	for _, m := range chat[begin+1:] {
 		switch {
 		case m.Target != "": // reactions are neither replies nor conversational turns
@@ -140,7 +147,19 @@ func (b *bridge) repliesTo(c *contact, request string, since, after int64) []mes
 			if m.Quoted == request && m.Seq > after {
 				found = append(found, m)
 			}
-		case !quotedOnly && m.Text != "" && m.Seq > after:
+		case !quotedOnly && (m.Text != "" || m.Audio) && m.Seq > after:
+			found = append(found, m)
+		}
+	}
+	return found
+}
+
+// voiceFrom lists the contact's voice notes from `since` on, after sequence `after`, whether or
+// not they answer a request. Must hold b.mu.
+func (b *bridge) voiceFrom(c *contact, since, after int64) []message {
+	found := []message{}
+	for _, m := range b.messages {
+		if m.Audio && !m.FromMe && c.has(m) && m.Timestamp >= since && m.Seq > after {
 			found = append(found, m)
 		}
 	}
@@ -161,8 +180,9 @@ type bridge struct {
 
 	mu       sync.Mutex
 	seq      int64
-	messages []message    // recent incoming one-to-one texts, newest last
-	changed  chan struct{} // closed and replaced whenever a message arrives
+	messages []message                      // recent incoming one-to-one texts, newest last
+	audio    map[string]*waE2E.AudioMessage // received audio by message ID, for /media
+	changed  chan struct{}                  // closed and replaced whenever a message arrives
 	contacts map[string]*contact
 
 	pairMu  sync.Mutex
@@ -194,8 +214,15 @@ func (b *bridge) onEvent(evt any) {
 			text = v.Message.GetExtendedTextMessage().GetText()
 		}
 		// Non-text messages (photos, voice notes) are kept too: they still mark turns.
-		b.record(message{ID: v.Info.ID, Timestamp: v.Info.Timestamp.Unix(), Text: text,
-			FromMe: v.Info.IsFromMe, Quoted: quotedID(v.Message), users: users})
+		m := message{ID: v.Info.ID, Timestamp: v.Info.Timestamp.Unix(), Text: text,
+			FromMe: v.Info.IsFromMe, Quoted: quotedID(v.Message), users: users}
+		if a := v.Message.GetAudioMessage(); a != nil {
+			m.Audio, m.Seconds = true, a.GetSeconds()
+			b.mu.Lock()
+			b.audio[v.Info.ID] = a
+			b.mu.Unlock()
+		}
+		b.record(m)
 	case *events.Connected:
 		log.Print("connected to WhatsApp")
 	case *events.Disconnected:
@@ -529,6 +556,53 @@ func (b *bridge) routes() *http.ServeMux {
 			users: []string{c.sendTo.User}})
 		reply(w, 200, map[string]any{"id": resp.ID, "timestamp": resp.Timestamp.Unix()})
 	})
+	mux.HandleFunc("GET /voice", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
+		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
+		wait, _ := strconv.Atoi(q.Get("wait"))
+		c, err := b.resolve(r.Context(), q.Get("contact"))
+		if err != nil {
+			fail(w, statusFor(err), err)
+			return
+		}
+		timeout := time.After(time.Duration(min(max(wait, 0), 30)) * time.Second)
+		for {
+			b.mu.Lock()
+			found := b.voiceFrom(c, since, after)
+			changed, seq := b.changed, b.seq
+			b.mu.Unlock()
+			// seq lets the caller notice a restarted bridge, whose numbering starts over.
+			if len(found) > 0 || seq < after {
+				reply(w, 200, map[string]any{"messages": found, "seq": seq})
+				return
+			}
+			select {
+			case <-changed:
+			case <-timeout:
+				reply(w, 200, map[string]any{"messages": found, "seq": seq})
+				return
+			case <-r.Context().Done():
+				return
+			}
+		}
+	})
+	mux.HandleFunc("GET /media", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		a := b.audio[r.URL.Query().Get("id")]
+		b.mu.Unlock()
+		if a == nil {
+			fail(w, 404, errors.New("no received audio with that id"))
+			return
+		}
+		data, err := b.client.Download(r.Context(), a)
+		if err != nil {
+			fail(w, 502, err)
+			return
+		}
+		w.Header().Set("Content-Type", a.GetMimetype())
+		w.Write(data)
+	})
 	mux.HandleFunc("GET /replies", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		request := q.Get("request")
@@ -582,7 +656,7 @@ func main() {
 		log.Fatal(err)
 	}
 	b := &bridge{client: whatsmeow.NewClient(device, waLog.Stdout("wa", *logLevel, false)),
-		changed: make(chan struct{}), contacts: map[string]*contact{}}
+		changed: make(chan struct{}), contacts: map[string]*contact{}, audio: map[string]*waE2E.AudioMessage{}}
 	b.client.AddEventHandler(b.onEvent)
 	if b.client.Store.ID == nil {
 		log.Print(`not paired: POST {"phone": "..."} to /pair and enter the code on your phone`)

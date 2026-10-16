@@ -2,9 +2,17 @@
 waits for its reply. The bridge owns the WhatsApp session; this side only speaks HTTP to it."""
 import json
 import time
+from dataclasses import dataclass
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+@dataclass
+class Reply:
+    """A reply that includes voice notes: their message IDs, plus any text that came with them."""
+    text: str
+    voice: list
 
 
 class WhatsApp:
@@ -23,6 +31,14 @@ class WhatsApp:
             detail = exc.read().decode(errors='replace').strip()[:200]
             raise RuntimeError(f'WhatsApp bridge {exc.code}: {detail}') from exc
 
+    def fetch(self, path, timeout=60):
+        try:
+            with urllib.request.urlopen(self.url + path, timeout=timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors='replace').strip()[:200]
+            raise RuntimeError(f'WhatsApp bridge {exc.code}: {detail}') from exc
+
     def send(self, text):
         """Send the spoken request, followed by the configured instruction that the reply
         will be read aloud; returns WhatsApp's {"id", "timestamp"} for the message."""
@@ -37,6 +53,18 @@ class WhatsApp:
         unrelated conversation (see repliesTo in bridge/main.go)."""
         return None
 
+    def voice(self, since, after, wait):
+        """The contact's voice notes from `since` on, after bridge sequence `after`, waiting up to
+        `wait` seconds for one: ([{"id", "seq", "timestamp", "seconds"}...], the bridge's latest seq)."""
+        query = urllib.parse.urlencode({'contact': self.config['contact'], 'since': int(since),
+                                        'after': after, 'wait': wait})
+        result = self.call('GET', f'/voice?{query}', timeout=wait + 10)
+        return result['messages'], result['seq']
+
+    def media(self, message_id):
+        """A received voice note's audio, as WhatsApp sent it (OGG/Opus)."""
+        return self.fetch('/media?' + urllib.parse.urlencode({'id': message_id}))
+
     def revoke(self, message_id):
         """Delete a sent request for everyone (the user cancelled it)."""
         self.call('POST', '/revoke', {'contact': self.config['contact'], 'id': message_id}, timeout=30)
@@ -47,8 +75,9 @@ class WhatsApp:
         bridge/main.go); `since` is the fallback if the bridge no longer knows the request.
         Follow-ups within reply_settle_seconds of the previous one are joined, since chat
         assistants often answer in several bubbles. The contact's emoji reactions to the
-        request are passed to on_reaction as they arrive; they are not the reply."""
-        texts, after, settle_until = [], 0, None
+        request are passed to on_reaction as they arrive; they are not the reply. A reply with
+        voice notes comes back as a Reply; text alone as a string."""
+        texts, voice, after, settle_until = [], [], 0, None
         while not stop.is_set():
             end = settle_until or deadline
             remaining = end - time.time()
@@ -59,7 +88,7 @@ class WhatsApp:
                                             'since': int(since), 'after': after, 'wait': wait})
             try:
                 result = self.call('GET', f'/replies?{query}', timeout=wait + 10)
-                found = result['messages']
+                found = result['messages'] or []  # null when only reactions came
             except (OSError, RuntimeError):
                 # Bridge restarting or WhatsApp reconnecting: retry within the deadline.
                 stop.wait(min(3, max(0, end - time.time())))
@@ -69,10 +98,15 @@ class WhatsApp:
                 if on_reaction:
                     on_reaction(reaction['reaction'])
             for message in found:
-                texts.append(message['text'])
+                if message.get('audio'):
+                    voice.append(message['id'])
+                elif message['text']:
+                    texts.append(message['text'])
                 after = max(after, message['seq'])
             if found:
                 settle_until = time.time() + self.config['reply_settle_seconds']
+        if voice:
+            return Reply('\n\n'.join(texts), voice)
         if texts:
             return '\n\n'.join(texts)
         if stop.is_set():

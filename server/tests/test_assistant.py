@@ -5,7 +5,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 from pathlib import Path
+import shutil
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -21,12 +23,12 @@ from voice_assistant.audio import (Capture, Framer, FRAME_BYTES, is_cancel_phras
 from voice_assistant import agenda
 from voice_assistant.deepgram import DeepgramListener, DeepgramVoice
 from voice_assistant.engines import Engines
-from voice_assistant.app import Session, system_stats
+from voice_assistant.app import Session, system_stats, voice_wav
 from voice_assistant.speech import chunks, speakable
 from voice_assistant.controls import Levels
 from voice_assistant.store import Store
 from voice_assistant.sms import GoogleVoice, message_text
-from voice_assistant.whatsapp import WhatsApp
+from voice_assistant.whatsapp import Reply, WhatsApp
 from email import message_from_string, policy
 
 AUDIO = dict(speech_rms=450, silence_seconds=0.16, start_timeout_seconds=0.24,
@@ -229,7 +231,7 @@ class SpeechTests(unittest.TestCase):
 
 class FakeBridge(BaseHTTPRequestHandler):
     """Minimal stand-in for the Go bridge's HTTP API."""
-    sent, replies, polls, requests, reactions = [], [], 0, [], []
+    sent, replies, polls, requests, reactions, voice, null_messages = [], [], 0, [], [], [], False
 
     def log_message(self, *args): pass
 
@@ -247,17 +249,32 @@ class FakeBridge(BaseHTTPRequestHandler):
         self.reply({'id': 'ABC', 'timestamp': 1000})
 
     def do_GET(self):
-        q = parse_qs(urlparse(self.path).query)
+        url = urlparse(self.path)
+        q = parse_qs(url.query)
+        if url.path == '/media':
+            data = b'OggS' + q['id'][0].encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if url.path == '/voice':
+            since, after = int(q['since'][0]), int(q['after'][0])
+            self.reply({'messages': [m for m in FakeBridge.voice if m['timestamp'] >= since and m['seq'] > after],
+                        'seq': max([m['seq'] for m in FakeBridge.voice], default=0)})
+            return
         FakeBridge.polls += 1
         FakeBridge.requests.append(q['request'][0])
         since, after = int(q['since'][0]), int(q['after'][0])
-        self.reply({'messages': [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after],
+        messages = [m for m in FakeBridge.replies if m['timestamp'] >= since and m['seq'] > after]
+        self.reply({'messages': None if FakeBridge.null_messages and not messages else messages,
                     'reactions': [r for r in FakeBridge.reactions if r['seq'] > after]})
 
 
 class WhatsAppTests(unittest.TestCase):
     def setUp(self):
         FakeBridge.sent, FakeBridge.replies, FakeBridge.polls, FakeBridge.requests, FakeBridge.reactions = [], [], 0, [], []
+        FakeBridge.voice, FakeBridge.null_messages = [], False
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), FakeBridge)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.client = WhatsApp(dict(bridge_url=f'http://127.0.0.1:{self.server.server_port}/', contact='Instinct',
@@ -291,6 +308,25 @@ class WhatsAppTests(unittest.TestCase):
         reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event(), seen.append)
         self.assertEqual((reply, seen), ('Two things are due.', ['👀']))
 
+    def test_reaction_with_null_messages_is_not_a_crash(self):
+        FakeBridge.reactions = [dict(seq=1, reaction='🎧', target='ABC')]
+        FakeBridge.null_messages = True  # the Go bridge sends null for an empty reply list
+        seen = []
+        with self.assertRaises(TimeoutError):
+            self.client.wait_reply('ABC', 1000, time.time() + 1.5, threading.Event(), seen.append)
+        self.assertEqual(seen[:1], ['🎧'])
+
+    def test_voice_note_reply_comes_back_as_ids(self):
+        FakeBridge.replies = [dict(seq=1, timestamp=1001, id='V1', text='', audio=True)]
+        reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
+        self.assertEqual(reply, Reply('', ['V1']))
+
+    def test_voice_notes_and_their_audio(self):
+        FakeBridge.voice = [dict(seq=2, timestamp=990, id='OLD'), dict(seq=3, timestamp=1005, id='V2')]
+        found, seq = self.client.voice(1000, 0, 1)
+        self.assertEqual(([m['id'] for m in found], seq), (['V2'], 3))
+        self.assertEqual(self.client.media('V2'), b'OggSV2')
+
     def test_timeout_and_bridge_down(self):
         with self.assertRaises(TimeoutError):
             self.client.wait_reply('ABC', 1000, time.time() + 1.5, threading.Event())
@@ -312,6 +348,18 @@ It is worth ten percent.
 YOUR ACCOUNT <https://voice.google.com> HELP CENTER <https://support.google.com/voice>
 To respond to this text message, reply to this email or visit Google Voice.
 """
+
+
+@unittest.skipUnless(shutil.which('ffmpeg'), 'needs ffmpeg')
+class VoiceWavTests(unittest.TestCase):
+    def test_opus_voice_note_becomes_mono_wav(self):
+        ogg = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i',
+                              'sine=frequency=440:duration=1.5', '-ac', '1', '-c:a', 'libopus', '-f', 'ogg', 'pipe:1'],
+                             capture_output=True, check=True).stdout
+        data, duration = voice_wav(ogg)
+        self.assertAlmostEqual(duration, 1.5, delta=0.05)
+        with wave.open(io.BytesIO(data), 'rb') as wav:
+            self.assertEqual((wav.getnchannels(), wav.getsampwidth()), (1, 2))
 
 
 class SmsTests(unittest.TestCase):
@@ -809,6 +857,59 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': events[-1]['id']}))
         await self.until('idle')
         self.assertIsNone(self.store.latest())  # not a request
+
+    async def test_voice_note_reply_is_played(self):
+        self.session.messenger.wait_reply = lambda *args: Reply('', ['V1'])
+        self.session.messenger.media = lambda message_id: b'OggS'
+        with patch('voice_assistant.app.voice_wav', lambda data: FakeEngines().synthesize('')):
+            await self.speak_request()
+            events = await self.until('audio_start')
+        self.assertEqual(events[-1]['id'], 'WA1')  # the reply's own playback ack
+        self.assertEqual(self.session.reply, 'Voice message')
+        self.assertTrue(self.store.voice_played('V1'))
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': 'WA1'}))
+        await self.until('idle')
+        self.assertEqual(self.store.latest()['status'], 'done')
+
+    async def test_voice_notes_within_the_window_are_played_once(self):
+        self.config['whatsapp']['voice_window_seconds'] = 600
+        self.store.create('WA0', 'Send me a voice note')
+        self.store.update('WA0', 'done')  # answered already; nothing to resume
+        notes = [([dict(id='V2', seq=1, timestamp=time.time())], 1)]
+        def voice(since, after, wait):
+            if notes:
+                return notes.pop()
+            time.sleep(0.05)
+            return [dict(id='V2', seq=1, timestamp=time.time())] if after < 1 else [], 1
+        self.session.messenger.voice = voice
+        self.session.messenger.media = lambda message_id: b'OggS'
+        self.session.engines.predict = lambda frame: 0  # no wake word
+        with patch('voice_assistant.app.voice_wav', lambda data: FakeEngines().synthesize('')):
+            self.task = asyncio.create_task(self.session.run())
+            await self.until('idle')
+            await asyncio.sleep(0.1)
+            await self.socket.incoming.put(SILENCE)  # the inbox is checked as audio arrives
+            events = await self.until('audio_start')
+        self.assertTrue(events[-1]['id'].startswith('voice-'))
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': events[-1]['id']}))
+        await self.until('idle')
+        self.assertTrue(self.store.voice_played('V2'))
+        self.session.voice_inbox.append('V2')  # seen again (e.g. after a reconnect): not replayed
+        await self.socket.incoming.put(SILENCE)
+        await asyncio.sleep(0.1)
+        self.assertTrue(self.socket.outgoing.empty())
+
+    async def test_voice_notes_after_the_window_are_ignored(self):
+        self.config['whatsapp']['voice_window_seconds'] = 600
+        self.store.create('WA0', 'Old request')
+        self.store.update('WA0', 'done')
+        self.store.db.execute('UPDATE requests SET created=?', (time.time() - 700,))
+        polled = []
+        self.session.messenger.voice = lambda *args: polled.append(args) or ([], 0)
+        self.task = asyncio.create_task(self.session.run())
+        await self.until('idle')
+        await asyncio.sleep(0.1)
+        self.assertEqual(polled, [])
 
     async def test_text_cancel_while_waiting_cannot_unsend(self):
         def waiting(request, since, deadline, stop, on_reaction=None):

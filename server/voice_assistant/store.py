@@ -9,6 +9,8 @@ class Store:
         self.db.execute('''CREATE TABLE IF NOT EXISTS requests (
             message_id TEXT PRIMARY KEY, transcript TEXT NOT NULL,
             reply TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, created REAL NOT NULL)''')
+        # Voice notes already played, so a reconnect or restart never plays one twice.
+        self.db.execute('CREATE TABLE IF NOT EXISTS voice (message_id TEXT PRIMARY KEY, played REAL NOT NULL)')
         self.db.commit()
 
     def create(self, message_id, transcript):
@@ -27,6 +29,13 @@ class Store:
     def rename(self, old_id, new_id):
         """Replace the local placeholder ID with the ID the message was sent under."""
         self.db.execute('UPDATE requests SET message_id=? WHERE message_id=?', (new_id, old_id))
+        self.db.commit()
+
+    def voice_played(self, message_id):
+        return self.db.execute('SELECT 1 FROM voice WHERE message_id=?', (message_id,)).fetchone() is not None
+
+    def mark_voice(self, message_id):
+        self.db.execute('INSERT OR IGNORE INTO voice VALUES (?, ?)', (message_id, time.time()))
         self.db.commit()
 
     def latest(self):

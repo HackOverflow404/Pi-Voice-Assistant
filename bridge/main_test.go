@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 )
 
@@ -22,17 +23,18 @@ type step struct {
 	user     string
 	reaction string
 	target   string
+	audio    bool
 }
 
 func chat(steps ...step) *bridge {
-	b := &bridge{changed: make(chan struct{})}
+	b := &bridge{changed: make(chan struct{}), audio: map[string]*waE2E.AudioMessage{}}
 	for _, s := range steps {
 		user := s.user
 		if user == "" {
 			user = instinct
 		}
 		b.record(message{ID: s.id, Timestamp: s.ts, Text: s.text, FromMe: s.fromMe, Quoted: s.quoted,
-			Reaction: s.reaction, Target: s.target, users: []string{user}})
+			Reaction: s.reaction, Target: s.target, Audio: s.audio, users: []string{user}})
 	}
 	return b
 }
@@ -150,5 +152,27 @@ func TestReactionsTo(t *testing.T) {
 	}
 	if got := ids(b.reactionsTo(c, "R", 2)); !reflect.DeepEqual(got, []string{"T"}) {
 		t.Errorf("after: got %v, want [T]", got)
+	}
+}
+
+func TestVoiceNotes(t *testing.T) {
+	c := &contact{users: map[string]bool{instinct: true, lid: true}}
+	b := chat(
+		step{id: "OLD", ts: 90, audio: true},
+		step{id: "R", ts: 100, text: "what is due?", fromMe: true},
+		step{id: "V1", ts: 105, audio: true},
+		step{id: "MINE", ts: 106, audio: true, fromMe: true},
+		step{id: "ELSE", ts: 107, audio: true, user: other},
+		step{id: "T", ts: 108, text: "also this"},
+		step{id: "V2", ts: 110, audio: true, user: lid},
+	)
+	if got := ids(b.repliesTo(c, "R", 0, 0)); !reflect.DeepEqual(got, []string{"V1"}) {
+		t.Errorf("a voice note answers the request: got %v", got)
+	}
+	if got := ids(b.voiceFrom(c, 100, 0)); !reflect.DeepEqual(got, []string{"V1", "V2"}) {
+		t.Errorf("voiceFrom: got %v", got)
+	}
+	if got := ids(b.voiceFrom(c, 100, 3)); !reflect.DeepEqual(got, []string{"V2"}) {
+		t.Errorf("voiceFrom after V1: got %v", got)
 	}
 }

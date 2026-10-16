@@ -195,9 +195,12 @@ message probably answers that). When in doubt it stays silent and reports no rep
 Answers split across several messages are joined if each follows within
 `reply_settle_seconds`. When the contact reacts to a request with an emoji listed in `whatsapp.reaction_phrases`
 (by default 👀 "Looking into it." and 👍 "On it."), the Echo says that phrase straight
-away, once per emoji; the actual reply is still read when it arrives. Every request ends with `whatsapp.instruction`, which asks for plain,
-unabbreviated sentences with times and room and course numbers written as spoken, since
-the reply is read aloud. The reply is cleaned for speech (sign-off,
+away, once per emoji; the actual reply is still read when it arrives. Every request ends with
+`whatsapp.instruction` ("Respond using an audio message"). A voice-note reply is played on the
+Echo as it is (the bridge downloads it, ffmpeg turns it into a WAV). For
+`whatsapp.voice_window_seconds` (10 minutes) after each request, any other voice note the contact
+sends is played too, whether or not it answers the request; each is played once, even across
+reconnects and restarts. A text reply is cleaned for speech (sign-off,
 formatting marks, emoji and links removed) and spoken one sentence at a time, so
 playback starts after the first sentence is synthesized. Unlinking the device on the
 phone logs the bridge out; pair again to restore it.
