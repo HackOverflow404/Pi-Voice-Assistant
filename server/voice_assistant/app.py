@@ -87,6 +87,10 @@ def load_config(path):
     c['stt'] = stt
     stt.setdefault('engine', 'whisper')
     stt.setdefault('deepgram_model', 'nova-3')
+    stt['keyterms'] = stt.get('keyterms') or []
+    if not (isinstance(stt['keyterms'], list) and len(stt['keyterms']) <= 100 and
+            all(isinstance(t, str) and t.strip() for t in stt['keyterms'])):
+        raise ValueError('stt.keyterms must be a list of up to 100 words or phrases')
     if stt['engine'] not in ('whisper', 'deepgram') or (stt['engine'] == 'deepgram' and not tts.get('deepgram_api_key')):
         raise ValueError('stt.engine must be whisper or deepgram; deepgram needs tts.deepgram_api_key')
     echo = c.setdefault('echo', {}) or {}

@@ -454,6 +454,9 @@ class VoiceTests(unittest.TestCase):
             auth, query, size = FakeDeepgram.seen[-1]
             self.assertEqual((auth, query['model'], query['sample_rate'], size),
                              ('Token KEY', ['nova-3'], ['16000'], len(SPEECH)))
+            self.assertNotIn('keyterm', query)
+            DeepgramListener('KEY', url=listener.url, keyterms=['Ted Lasso', 'ECE']).transcribe(SPEECH)
+            self.assertEqual(FakeDeepgram.seen[-1][1]['keyterm'], ['Ted Lasso', 'ECE'])
         finally:
             server.shutdown(); server.server_close()
 

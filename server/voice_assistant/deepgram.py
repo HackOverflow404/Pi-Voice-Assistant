@@ -25,13 +25,16 @@ def post(url, key, body, content_type, timeout):
 
 
 class DeepgramListener:
-    """Transcribes one recorded request (16 kHz mono int16 PCM) with Nova-3."""
-    def __init__(self, api_key, model='nova-3', url=LISTEN_API, timeout=8):
+    """Transcribes one recorded request (16 kHz mono int16 PCM) with Nova-3. Keyterms are
+    names and jargon the model would otherwise mishear ("Ted Lasso" as "head loss officer")."""
+    def __init__(self, api_key, model='nova-3', url=LISTEN_API, timeout=8, keyterms=()):
         self.api_key, self.model, self.url, self.timeout = api_key, model, url, timeout
+        self.keyterms = list(keyterms)
 
     def transcribe(self, pcm):
-        query = urllib.parse.urlencode({'model': self.model, 'language': 'en', 'smart_format': 'true',
-                                        'encoding': 'linear16', 'sample_rate': 16000, 'channels': 1})
+        query = urllib.parse.urlencode([('model', self.model), ('language', 'en'), ('smart_format', 'true'),
+                                        ('encoding', 'linear16'), ('sample_rate', 16000), ('channels', 1)] +
+                                       [('keyterm', term) for term in self.keyterms])
         result = json.loads(post(f'{self.url}?{query}', self.api_key, pcm, 'application/octet-stream', self.timeout))
         return result['results']['channels'][0]['alternatives'][0]['transcript'].strip()
 

@@ -92,6 +92,10 @@ stt:
   # saves ~130 MB); if Deepgram fails, the request is reported, not transcribed locally.
   engine: whisper
   deepgram_model: nova-3
+  # Names and jargon you say that get misheard: people, places, course codes, shows. Nova-3
+  # favours these spellings (keyterm prompting, up to 100); Whisper gets them as hotwords.
+  # Keep it to words that actually go wrong: every term nudges similar-sounding speech toward it.
+  keyterms: [Clippy, Instinct]
 echo:
   # adb serial of the Echo attached to the Pi by USB; null uses the only attached device.
   adb_serial: null
