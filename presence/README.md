@@ -24,15 +24,17 @@ Echo camera → SECUR-T hub (localhost:7002, H.264) → ffmpeg → MediaPipe on 
   width, as a fraction of the frame width, stands in for distance.
 - `near` starts at `near_enter` (0.12) and ends below `near_exit` (0.095). The band between
   them stops leaning back and forth from flipping the layout.
-- A zone has to hold before it is reported: 0.6 s to become near, 1.5 s to become far, and
+- A zone has to hold before it is reported: 0.4 s to become near, 1.0 s to become far, and
   0.5 s when coming back from away.
 - With no face (your back is turned, or you're across the room, where faces are too small to
   detect), a person detector runs every 1.5 s (250 ms each). It runs on the left and right square
   of the frame in turn: squashing the whole 16:9 frame into its 320x320 input dropped a person
   across the room from a 0.9 score to 0.11. A person seen keeps you present for 6 s.
-- Near with no face for 8 s becomes far, unless the body seen is at least `person_near` (0.85)
-  of the frame tall. That's you at the desk looking down at a laptop (1.0); across the room is
-  about 0.57. A body alone never switches far to near; that takes a face.
+- Near with no face for 3.5 s becomes far right away, unless the body seen is at least
+  `person_near` (0.85) of the frame tall. That's you at the desk looking down at a laptop (1.0);
+  across the room is about 0.57. Walking out of frame entirely also becomes far (then away after
+  90 s). At the desk the face drops out for up to ~17 s at a time, but the body scored 0.99-1.0 on
+  every check, so near holds. A body alone never switches far to near; that takes a face.
 - No face or person for 90 s means away.
 
 The Echo animates each change. Both layouts stay laid out, and the morph only changes GPU layer

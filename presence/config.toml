@@ -23,10 +23,11 @@ throttle_temp = 78              # halve the rates at or above this CPU temperatu
 # the room (~3 m) no face is found at all, so far comes from the person detector.
 near_enter = 0.115
 near_exit = 0.095
-to_near = 0.6
-to_far = 1.5
+to_near = 0.4
+to_far = 1.0
 to_back = 0.5
-face_lost = 8.0
+face_lost = 3.5               # at the desk the face drops out for up to ~17 s, but the body
+                              # (1.0 of the frame) holds near through person_near
 person_near = 0.85            # a body this tall (fraction of frame) still counts as near
 person_hold = 6.0
 away_after = 90.0

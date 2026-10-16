@@ -44,9 +44,23 @@ class ZoneTests(unittest.TestCase):
 
     def test_turning_away_keeps_near_then_becomes_far(self):
         run(self.z, 0, 2, face_width=0.2)
-        self.assertEqual(run(self.z, 2, 5, person=0.57), [])  # back turned: still here, still near
-        changes = run(self.z, 7, 6, person=0.57)  # but the body is across-the-room sized
+        lost = self.c.face_lost
+        self.assertEqual(run(self.z, 2, lost - 0.5, person=0.57), [])  # back turned: still near for now
+        changes = run(self.z, 1.5 + lost, 3, person=0.57)  # but the body is across-the-room sized
         self.assertEqual([z for _, z in changes], ['far'])
+        self.assertLess(changes[0][0] - 2, lost + 0.3)  # no extra dwell after face_lost
+
+    def test_walking_out_of_frame_goes_far_then_away(self):
+        run(self.z, 0, 2, face_width=0.2)  # near, then nothing at all is seen
+        changes = run(self.z, 2, self.c.away_after + 5)
+        self.assertEqual([z for _, z in changes], ['far', 'away'])
+        self.assertLess(changes[0][0] - 2, self.c.face_lost + 0.3)  # not held near until away
+
+    def test_sitting_down_is_quick(self):
+        run(self.z, 0, 3, face_width=0.05)  # far
+        changes = run(self.z, 3, 2, face_width=0.2)
+        self.assertEqual([z for _, z in changes], ['near'])
+        self.assertLess(changes[0][0] - 3, 0.7)
 
     def test_looking_down_at_the_desk_stays_near(self):
         run(self.z, 0, 2, face_width=0.18)

@@ -12,10 +12,11 @@ from dataclasses import dataclass
 class ZoneConfig:
     near_enter: float = 0.115  # face width / frame width at which someone counts as near
     near_exit: float = 0.095   # ...and below which they stop counting (hysteresis band)
-    to_near: float = 0.6       # seconds a new zone must hold before it is reported
-    to_far: float = 1.5
+    to_near: float = 0.4       # seconds a new zone must hold before it is reported
+    to_far: float = 1.0
     to_back: float = 0.5       # from away (or unknown) to near/far
-    face_lost: float = 8.0     # near with no face this long (back turned, walked off) becomes far...
+    face_lost: float = 3.5     # near with no face this long (back turned, walked off) becomes far, with
+                               # no further dwell since this was the wait...
     person_near: float = 0.85  # ...unless a body this tall (fraction of frame height) is still seen:
                                # at the desk looking down at a laptop, the body fills the frame (1.0);
                                # across the room it is ~0.57
@@ -50,17 +51,17 @@ class ZoneTracker:
     def _decide(self, now, face_width):
         c, zone = self.c, self.zone
         seen = self.last_person is not None and now - self.last_person < c.person_hold
+        close = max((t for t in (self.last_face, self.last_close) if t is not None), default=None)
+        lost = False  # far because a near face is gone: face_lost was already the wait
         if face_width is not None:
             near = face_width >= (c.near_exit if zone == 'near' else c.near_enter)
             want = 'near' if near else 'far'
+        elif zone == 'near' and (close is None or now - close >= c.face_lost):
+            # Near without a face (or a desk-filling body) for a while: stepped back, turned away
+            # or walked off. Far now, whether or not the person detector still sees them.
+            want, lost = 'far', True
         elif seen or (self.last_face is not None and now - self.last_face < c.face_lost):
-            # Someone is here but their face isn't visible: keep the zone, except that near
-            # without a face for a while is really someone who has stepped back or turned away.
-            close = max((t for t in (self.last_face, self.last_close) if t is not None), default=None)
-            if zone == 'near' and (close is None or now - close >= c.face_lost):
-                want = 'far'
-            else:
-                want = zone if zone in ('near', 'far') else 'far'
+            want = zone if zone in ('near', 'far') else 'far'  # here, face hidden: keep the zone
         else:
             last = self.last_person if self.last_person is not None else self.started
             want = 'away' if now - last >= c.away_after else zone
@@ -69,8 +70,8 @@ class ZoneTracker:
             return None
         if want != self.candidate:
             self.candidate, self.candidate_since = want, now
-        if want == 'away':
-            dwell = 0  # away_after was already the wait
+        if want == 'away' or lost:
+            dwell = 0  # away_after or face_lost was already the wait
         elif zone in ('away', 'unknown'):
             dwell = c.to_back
         else:
