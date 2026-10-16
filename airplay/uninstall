@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Remove airplay-relay from the Pi (default: mainframe). AirPlay stops until the stock
+# shairport-sync is re-enabled: ssh -t mainframe 'sudo systemctl enable --now shairport-sync'
+set -euo pipefail
+host=${PI_HOST:-mainframe}
+echo "Removing $host:~/.local/share/airplay-relay and its user service"
+ssh "$host" bash -s <<'REMOTE'
+set -euo pipefail
+systemctl --user disable --now airplay-relay.service 2>/dev/null || true
+rm -f ~/.config/systemd/user/airplay-relay.service
+systemctl --user daemon-reload
+rm -rf ~/.local/share/airplay-relay
+REMOTE

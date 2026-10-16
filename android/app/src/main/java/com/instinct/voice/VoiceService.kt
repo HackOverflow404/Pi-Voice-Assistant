@@ -43,6 +43,7 @@ class VoiceService : Service() {
     private val client = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS)
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(0, TimeUnit.SECONDS).build()
     private var runner: Job? = null
+    private var airplay: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLocks = emptyList<WifiManager.WifiLock>()
     // Set once the current socket opens, so a dead USB tunnel can fall back to Wi-Fi at once.
@@ -139,6 +140,7 @@ class VoiceService : Service() {
                 .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PiVoice:microphone").apply { acquire() }
             wifiLocks = holdWifi()
             State.running(true)
+            airplay = scope.launch { AirPlay(this@VoiceService).run() }
             runner = scope.launch {
                 var backoff = 1000L
                 var viaUsb = true

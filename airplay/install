@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Install airplay-relay on the Pi (default: mainframe) as a systemd user service, from this
+# machine. Live copy: ~/.local/share/airplay-relay there. The stock system shairport-sync must
+# be disabled first (it would advertise the same name and hold port 5000); that needs root, so
+# this script prints the command instead of running it.
+set -euo pipefail
+cd -- "$(dirname -- "$0")"
+host=${PI_HOST:-mainframe}
+live=.local/share/airplay-relay
+if ssh "$host" 'systemctl is-active -q shairport-sync.service || systemctl is-enabled -q shairport-sync.service' 2>/dev/null; then
+  echo "The system shairport-sync service is still enabled on $host. Disable it first:" >&2
+  echo "  ssh -t $host 'sudo systemctl disable --now shairport-sync'" >&2
+  exit 1
+fi
+echo "Installing to $host:~/$live and $host:~/.config/systemd/user/airplay-relay.service"
+ssh "$host" "mkdir -p ~/$live ~/.config/systemd/user"
+scp -q relay.py shairport-sync.conf "$host:$live/"
+scp -q systemd/airplay-relay.service "$host:.config/systemd/user/"
+ssh "$host" bash -s <<'REMOTE'
+set -euo pipefail
+systemctl --user daemon-reload
+systemctl --user enable airplay-relay.service
+systemctl --user restart airplay-relay.service
+sleep 3
+systemctl --user is-active airplay-relay.service
+REMOTE

@@ -1,0 +1,17 @@
+[Unit]
+Description=AirPlay receiver that plays on the Echo Show (shairport-sync relayed over USB)
+After=network-online.target avahi-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/airplay-relay
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 relay.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
