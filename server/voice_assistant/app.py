@@ -17,7 +17,7 @@ import time
 import uuid
 import wave
 
-from . import agenda, controls, skills
+from . import agenda, chime, controls, skills
 from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_transcript, normalize, rms,
                     speech_threshold, wake_is_plausible)
 from .speech import chunks, speakable
@@ -108,6 +108,12 @@ def load_config(path):
     lamp.setdefault('command', [])
     if not isinstance(lamp['command'], list):
         raise ValueError('lamp.command must be a list, e.g. [/usr/bin/python3, /home/user/rf-lamp/send.py]')
+    phone = c.setdefault('phone', {}) or {}
+    c['phone'] = phone
+    phone.setdefault('token', '')
+    phone.setdefault('ha_url', 'http://127.0.0.1:8123')
+    phone.setdefault('notify', 'mobile_app_lc_3')
+    phone.setdefault('tracker', 'device_tracker.lc_3')
     jev = c.setdefault('jev', {}) or {}
     c['jev'] = jev
     jev.setdefault('api_key', '')
@@ -220,10 +226,11 @@ def system_stats():
 
 class Session:
     def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
-                 clock=None, weather=None, lamp=None, hub=None, messenger=None):
+                 clock=None, weather=None, lamp=None, hub=None, messenger=None, phone=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
         self.lamp = lamp  # controls.Lamp, or None when lamp.command isn't configured
+        self.phone = phone  # controls.Phone, or None when phone.token isn't configured
         self.hub = hub  # hass.Hub (Clippy in Home Assistant), or None when mqtt.host isn't set
         self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
@@ -696,7 +703,8 @@ class Session:
             return command or 'instinct'
         started = time.monotonic()
         try:
-            decision, probability = await asyncio.to_thread(self.jev.decide, text)
+            recent = controls.recent_exchange(self.store.latest(), time.time())
+            decision, probability = await asyncio.to_thread(self.jev.decide, text, recent)
         except Exception as exc:
             LOG.warning('Jev failed (%s); sending to Instinct', exc)
             return 'instinct'
@@ -735,6 +743,11 @@ class Session:
                 else:
                     await self.blocking(self.lamp.press, command.action)
                     self.reply = controls.LAMP[command.action][2]
+            elif command.action == 'phone_ping':
+                if not self.phone:
+                    self.reply = "Finding your phone isn't set up yet."
+                else:
+                    self.reply = await self.blocking(self.phone.ping)
             elif command.action.startswith('ai_'):
                 current = self.levels.speech_volume
                 level = {'ai_up': current + controls.STEP, 'ai_down': current - controls.STEP}.get(
@@ -748,6 +761,8 @@ class Session:
             LOG.warning('Device command %s failed: %s', command.action, exc)
             if command.action in controls.LAMP:
                 self.error, self.reply = 'Could not reach the lamp', "Sorry, I couldn't reach the lamp."
+            elif command.action == 'phone_ping':
+                self.error, self.reply = 'Could not reach Home Assistant', "Sorry, I couldn't ring your phone."
             else:
                 self.error = 'Could not control the Echo'
                 self.reply = 'Sorry, I could not change that on the Echo.'
@@ -895,9 +910,11 @@ class Session:
     def transcribe(self, pcm):
         if self.config['audio'].get('debug_save_utterances'):
             self.save_utterance(pcm)
+        pcm, dechimed = chime.remove(pcm)
         pcm, gain = normalize(pcm)
         text = self.engines.transcribe(pcm)
-        LOG.info('Transcribed %.1f s at gain %.1fx: %d words', len(pcm) / 32000, gain, len(text.split()))
+        LOG.info('Transcribed %.1f s at gain %.1fx (chime -%.0f dB): %d words', len(pcm) / 32000, gain,
+                 dechimed, len(text.split()))
         return text
 
     async def telemetry(self):
@@ -958,6 +975,7 @@ async def serve(config, engines):
     echo = controls.Echo(config['echo'])
     jev = controls.Jev(config['jev']) if config['jev'].get('api_key') else None
     lamp = controls.Lamp(config['lamp']) if config['lamp']['command'] else None
+    phone = controls.Phone(config['phone']) if config['phone']['token'] else None
     hub = None
     if config['mqtt']['host']:
         from .hass import Hub
@@ -979,8 +997,8 @@ async def serve(config, engines):
                 clock.tick()
             await asyncio.sleep(0.5)
     clock_task = asyncio.create_task(ticker())  # noqa: F841 (kept referenced)
-    LOG.info('Device commands: grammar%s; lamp %s', ' + Jev fallback' if jev else ' only (no jev.api_key)',
-             'enabled' if lamp else 'not configured')
+    LOG.info('Device commands: grammar%s; lamp %s; phone %s', ' + Jev fallback' if jev else ' only (no jev.api_key)',
+             'enabled' if lamp else 'not configured', 'enabled' if phone else 'not configured')
     current = None  # (connection, finished event) of the connected microphone
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
     if config['calendar']['ical_urls']:
@@ -1017,7 +1035,7 @@ async def serve(config, engines):
         session = None
         try:
             session = Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather,
-                              lamp=lamp, hub=hub, messenger=messenger)
+                              lamp=lamp, hub=hub, messenger=messenger, phone=phone)
             if hub:
                 hub.attach(session)
             await session.run()

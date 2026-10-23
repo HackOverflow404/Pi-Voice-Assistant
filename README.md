@@ -328,6 +328,12 @@ After the wake word, a few phrases control the Echo itself instead of going to I
   "sun mode", "night light", "milk mode", "reading light" or "book mode", "laptop mode", "K mode".
   The Pi presses the lamp remote's buttons through the rf-lamp project's `send.py`, set in
   `lamp.command`. A preset word alone ("book") doesn't count; it needs the lamp or a mode word.
+- **Find my phone:** "find my phone", "ping my phone", "where's my phone", "I can't find my
+  phone", "make my phone ring". The Pi asks Home Assistant to send the phone a Companion-app
+  critical alert, which sounds even on silent or in a Focus, then says where HA last saw it
+  ("Ringing your phone. It was last at home 4 minutes ago."). Set `phone.token` to an HA
+  long-lived access token; `phone.notify` and `phone.tracker` name the phone's entities.
+  Critical Alerts must be allowed for the Home Assistant app on the phone.
 
 Each is confirmed aloud and never sent to WhatsApp. Only an utterance that is entirely one of
 these phrases counts, so "what's the volume of a sphere" still goes to Instinct.

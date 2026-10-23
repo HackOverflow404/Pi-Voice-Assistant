@@ -1,5 +1,6 @@
 """Spoken device commands: the Echo's Bluetooth pairing and system (media) and assistant
-voice volumes, and the RF desk lamp (through its remote, wired to the Pi; see rf-lamp).
+voice volumes, the RF desk lamp (through its remote, wired to the Pi; see rf-lamp), and
+finding the user's phone (a Home Assistant critical alert to the Companion app).
 
 Every transcript is routed one of four ways: a device command (handled here, never sent),
 a cancellation, an accidental trigger (both discarded), or a request for Instinct. A small
@@ -8,6 +9,7 @@ fixed grammar recognizes device commands instantly; anything it doesn't match go
 device action together in one request. Without Jev, or when Jev fails or is unsure, the
 request goes to Instinct exactly as before."""
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
@@ -34,7 +36,7 @@ LAMP = {
     'lamp_laptop': ('laptop', "Set the lamp to its laptop or screen-work preset.", 'Lamp on laptop mode.'),
 }
 ACTIONS = ('pairing_on', 'pairing_off', 'system_up', 'system_down', 'system_set',
-           'ai_up', 'ai_down', 'ai_set', *LAMP)
+           'ai_up', 'ai_down', 'ai_set', 'phone_ping', *LAMP)
 STEP = 0.1  # "volume up/down" moves this fraction of the full range
 
 
@@ -136,8 +138,13 @@ def target_of(word):
 
 
 LAMP_WORD = r'(?:the |my |desk )*(?:lamp|light|lights)'
+# What speech recognition makes of "lamp" on the Echo's narrowband microphone (seen in the logs:
+# "turn on my lap", "turn on my load", "turn off my laptop"). Only accepted after "turn on/off my",
+# where nothing else this speaker controls would fit.
+LAMP_MISHEARD = r'(?:the |my |desk )+(?:lap|laps|lab|lamb|lump|load|loud|land|lamps|laptop|lam)'
 TURN = r'(?:turn|switch|flip|put)'
 LAMP_PATTERNS = [
+    (re.compile(rf'{TURN} (?:on|off) {LAMP_MISHEARD}|{TURN} {LAMP_MISHEARD} (?:on|off)'), 'lamp_on_off'),
     (re.compile(rf'(?:{TURN} (?:on|off) {LAMP_WORD}|{TURN} {LAMP_WORD} (?:on|off)|{LAMP_WORD} (?:on|off)|'
                 rf'toggle {LAMP_WORD})'), 'lamp_on_off'),
     # The lamp must be named: "set a one hour timer" alone is the timers skill's.
@@ -177,10 +184,21 @@ def parse_lamp(said):
     return None
 
 
+# "Find my phone", "ping my iPhone", "where's my phone", "I can't find my phone".
+PHONE_WORD = r'(?:my |the )?(?:i ?phone|phone|cell(?: phone)?|mobile)'
+PHONE_PATTERN = re.compile(
+    rf'(?:help me )?(?:find|ping|ring|locate|buzz|beep) {PHONE_WORD}|'
+    rf'(?:where\'?s|where is|where did i (?:put|leave)) {PHONE_WORD}|'
+    rf'i (?:can\'?t|cannot|can not) find {PHONE_WORD}|'
+    rf'(?:make|have) {PHONE_WORD} (?:ring|beep|make a (?:sound|noise))|play a sound on {PHONE_WORD}')
+
+
 def parse(text):
     """The device command that the whole utterance is, or None. It must match in full, so
     a question that merely mentions volume or pairing still goes to Instinct."""
     said = normalize(text)
+    if PHONE_PATTERN.fullmatch(said):
+        return Command('phone_ping')
     lamp = parse_lamp(said)
     if lamp:
         return lamp
@@ -212,7 +230,10 @@ def parse(text):
 CONTEXT = ('Speech-to-text of what a microphone on an Echo Show speaker picked up just after it heard '
            'something like its wake word "Hey Clippy". The microphone hears the whole room, and the wake '
            'word sometimes fires by mistake on similar-sounding speech, TV or music, so the transcript may '
-           'be words that were never meant for the assistant at all.')
+           'be words that were never meant for the assistant at all. The microphone is quiet and muffled, so '
+           'speech recognition garbles short lamp commands: "lamp" comes out as "lap", "load", "lab" or '
+           '"laptop", and "turn off" as "turn over" or "turn off now". When "recent" is given, it is the '
+           'user\'s last exchange with Instinct, and this transcript may continue it.')
 
 # Asked alongside the route: a confident "no" discards the transcript whatever the route says, so
 # a remark or overheard sentence is never sent on just because it could be read as a message.
@@ -223,25 +244,32 @@ ADDRESSED = {
            'instruction or request to it. Anything that starts by asking it to ' + INSTRUCTION_VERBS +
            ' is meant for it, whatever the rest says, because the rest is the content to send or keep: '
            '"text mom I\'m running late", "text dad happy birthday", "note that my exam is on Friday" '
-           'and "tell Instinct I finished the assignment" are all meant for the assistant.',
+           'and "tell Instinct I finished the assignment" are all meant for the assistant. So is information '
+           'given to Instinct even with no request in it, when it answers a question Instinct just asked '
+           'or adds details or corrections to a recent request (see "recent"): after Instinct asks for a '
+           'birthday, "the birthday is October 25, and it\'s not the same person" is meant for it.',
     'no': 'Not meant for the assistant as a command, question or message: a remark, reaction or '
           'exclamation ("ugh, I\'m so tired", "that was amazing"); thinking out loud or a question to '
           'oneself ("where did I put my keys"); a rhetorical question; talking to another person in the '
-          'room or on a call; talking about the assistant rather than to it ("Clippy never hears me"); '
+          'room or on a call, including suggestions and invitations to them ("come on, let\'s go '
+          'shopping", "let\'s grab food"); talking about the assistant rather than to it ("Clippy never hears me"); '
           'narrating or retelling what someone said; reading text aloud, singing or quoting; dialogue '
           'from a TV, video, game or song; or a fragment, filler or noise. A statement with no '
-          'instruction to the assistant ("I\'m running late again") is not meant for it.',
+          'instruction to the assistant ("I\'m running late again") is not meant for it, unless it answers '
+          'or follows up the recent exchange with Instinct.',
 }
 ROUTES = {
     'instinct': 'A question, request or message spoken to the voice assistant on purpose, that the '
                 'speaker cannot handle by itself: knowledge, assignments, email, reminders, notes, messages '
                 'to send, and advanced math (algebra, calculus, statistics, proofs, unit conversions, word '
                 'problems). An instruction to ' + INSTRUCTION_VERBS + ' something belongs here even when '
-                'what follows is a plain statement, such as "text dad happy birthday".',
+                'what follows is a plain statement, such as "text dad happy birthday". So does an answer to a '
+                'question Instinct just asked, or more details, context or a correction for a recent '
+                'request, even with no request of its own.',
     'device': 'Something this speaker does itself, asked for or instructed rather than merely mentioned: '
               'Bluetooth pairing mode or volume; the desk lamp (on or '
               'off, brighter, dimmer, warmer, cooler, a one-hour timer, or presets like sun, night, milk, '
-              'reading and laptop); setting, pausing, '
+              'reading and laptop); ringing the user\'s phone to find it; setting, pausing, '
               'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
               'stopwatch; saying the current time or date; simple arithmetic; or the local weather or the '
               'user\'s calendar events. Not advanced math, assignments, email or general knowledge.',
@@ -277,6 +305,8 @@ DEVICE_ACTIONS = {
     'math': 'Simple arithmetic: adding, subtracting, multiplying, dividing, percentages, powers or square roots of numbers.',
     'weather_query': 'Ask about the local weather or temperature, now or tomorrow.',
     'calendar_query': 'Ask what is on the user\'s calendar or schedule today or tomorrow, or what is next.',
+    'phone_ping': 'Ring the user\'s phone so they can find it, or say where it is ("find my phone", '
+                  '"where\'s my phone", "I can\'t find my phone").',
     **{action: description for action, (_, description, _) in LAMP.items()},
     'none': 'Not a device command.',
 }
@@ -291,9 +321,12 @@ class Jev:
         self.min_probability = config.get('min_probability', 0.6)
         self.timeout = config.get('timeout_seconds', 3)
 
-    def request(self, text):
+    def request(self, text, recent=None):
+        state = {'transcript': text, 'context': CONTEXT}
+        if recent:
+            state['recent'] = recent
         return {'model': self.model,
-                'state': {'transcript': text, 'context': CONTEXT},
+                'state': state,
                 'questions': {
                     'addressed': {'type': 'choice',
                                   'instructions': 'Was this said to the assistant on purpose, as a command, '
@@ -305,8 +338,8 @@ class Jev:
                                       'instructions': 'If the speaker should do this itself, which action?',
                                       'criteria': DEVICE_ACTIONS}}}
 
-    def call(self, text):
-        request = urllib.request.Request(self.url, data=json.dumps(self.request(text)).encode(), headers={
+    def call(self, text, recent=None):
+        request = urllib.request.Request(self.url, data=json.dumps(self.request(text, recent)).encode(), headers={
             'Authorization': f'Bearer {self.key}', 'Content-Type': 'application/json'})
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -315,13 +348,13 @@ class Jev:
             detail = exc.read().decode(errors='replace').strip()[:200]
             raise RuntimeError(f'Jev {exc.code}: {detail}') from exc
 
-    def decide(self, text):
+    def decide(self, text, recent=None):
         """('instinct' | 'cancel' | 'accidental' | Command, route probability). The "addressed"
         answer settles whether it was meant for the assistant at all: a confident no discards it, and
         a confident yes stops an "accidental" route from discarding a real instruction such as "text
         mom I'm running late". Anything else unsure or incomplete falls back to Instinct, which is
         what happened before Jev."""
-        answers = self.call(text)['answers']
+        answers = self.call(text, recent)['answers']
         route = answers['route']
         probability = route['probabilities'].get(route['choice'], 0.0)
         addressed = answers.get('addressed') or {'choice': None, 'probabilities': {}}
@@ -351,6 +384,24 @@ class Jev:
         return Command(action['choice']), probability
 
 
+RECENT_SECONDS = 600  # an exchange with Instinct this recent is context for the next request
+
+
+def recent_exchange(request, now):
+    """The last request to Instinct and its reply, as context for Jev, while it is recent."""
+    if not request or now - request['created'] > RECENT_SECONDS:
+        return None
+    minutes = round((now - request['created']) / 60)
+    when = 'Just now' if minutes < 1 else f'{minutes} minute{"s" * (minutes != 1)} ago'
+    text = f'{when} the user asked Instinct: "{request["transcript"]}".'
+    reply = (request.get('reply') or '').strip()
+    if reply and reply != 'Voice message':
+        text += f' Instinct replied: "{reply[:800]}"'
+    elif reply:
+        text += ' Instinct replied with a voice message.'
+    return text
+
+
 # ---------------------------------------------------------------- the desk lamp
 
 class Lamp:
@@ -366,6 +417,59 @@ class Lamp:
                                   stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f'lamp {button} failed: {(result.stderr or result.stdout).strip()[:200]}')
+
+
+# ---------------------------------------------------------------- the user's phone
+
+def ago(seconds):
+    if seconds < 90:
+        return 'a moment ago'
+    if seconds < 5400:
+        return f'{round(seconds / 60)} minutes ago'
+    if seconds < 172800:
+        hours = round(seconds / 3600)
+        return 'an hour ago' if hours == 1 else f'{hours} hours ago'
+    return f'{round(seconds / 86400)} days ago'
+
+
+class Phone:
+    """Rings the phone through Home Assistant: a Companion-app critical alert, which sounds
+    even on silent or in a Focus. Then says where HA last saw it (its device tracker)."""
+    def __init__(self, config, opener=urllib.request.urlopen):
+        self.url, self.token = config['ha_url'].rstrip('/'), config['token']
+        self.notify, self.tracker = config['notify'], config['tracker']
+        self.open = opener
+
+    def api(self, method, path, body=None):
+        request = urllib.request.Request(
+            f'{self.url}/api/{path}', method=method, data=None if body is None else json.dumps(body).encode(),
+            headers={'Authorization': f'Bearer {self.token}', 'Content-Type': 'application/json'})
+        try:
+            with self.open(request, timeout=8) as response:
+                return json.loads(response.read() or b'null')
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f'Home Assistant {exc.code} for {path}') from exc
+
+    def ping(self, now=None):
+        """Ring it and return what to say."""
+        self.api('POST', f'services/notify/{self.notify}', {
+            'title': 'Clippy', 'message': '📍 Clippy is looking for your phone',
+            'data': {'push': {'sound': {'name': 'default', 'critical': 1, 'volume': 1.0}}}})
+        try:
+            where = self.where(self.api('GET', f'states/{self.tracker}'), now)
+        except Exception:  # the ring went out; the location is a bonus
+            where = ''
+        return f'Ringing your phone.{where}'
+
+    @staticmethod
+    def where(tracker, now=None):
+        zone = tracker.get('state')
+        if zone in (None, 'unknown', 'unavailable'):
+            return ''
+        place = {'home': 'at home', 'not_home': 'away from home'}.get(zone, f'at {zone}')
+        seen = datetime.fromisoformat(tracker['last_updated'])
+        seconds = ((now or datetime.now(timezone.utc)) - seen).total_seconds()
+        return f' It was last {place} {ago(max(seconds, 0))}.'
 
 
 # ---------------------------------------------------------------- the Echo, over the Pi's adb

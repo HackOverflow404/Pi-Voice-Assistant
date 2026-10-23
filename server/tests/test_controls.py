@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+import io
+import json
 import subprocess
 import tempfile
 import unittest
@@ -63,9 +66,31 @@ class FakeJev(Jev):
             self.response['answers']['addressed'] = answer(addressed, addressed_p, controls.ADDRESSED)
         self.sent = None
 
-    def call(self, text):
-        self.sent = self.request(text)
+    def call(self, text, recent=None):
+        self.sent = self.request(text, recent)
         return self.response
+
+
+class RecentExchangeTests(unittest.TestCase):
+    def test_recent_request_and_reply_become_context(self):
+        request = {'transcript': 'Find a gift for Maya', 'reply': 'Got it. When is her birthday?', 'created': 1000}
+        text = controls.recent_exchange(request, 1180)
+        self.assertEqual(text, '3 minutes ago the user asked Instinct: "Find a gift for Maya". '
+                               'Instinct replied: "Got it. When is her birthday?"')
+        self.assertIn('voice message', controls.recent_exchange({**request, 'reply': 'Voice message'}, 1010))
+        self.assertTrue(controls.recent_exchange({**request, 'reply': ''}, 1010).startswith('Just now'))
+
+    def test_old_or_missing_exchange_is_not_context(self):
+        self.assertIsNone(controls.recent_exchange(None, 1000))
+        self.assertIsNone(controls.recent_exchange({'transcript': 'x', 'reply': '', 'created': 0},
+                                                   controls.RECENT_SECONDS + 1))
+
+    def test_jev_sees_recent_only_when_given(self):
+        jev = FakeJev('instinct', 0.9)
+        jev.decide('The birthday is October 25', 'Just now the user asked Instinct: "gift ideas".')
+        self.assertEqual(jev.sent['state']['recent'], 'Just now the user asked Instinct: "gift ideas".')
+        jev.decide('hello')
+        self.assertNotIn('recent', jev.sent['state'])
 
 
 class JevTests(unittest.TestCase):
@@ -127,6 +152,13 @@ class LampGrammarTests(unittest.TestCase):
         for said, action in cases.items():
             self.assertEqual(parse(said), Command(action), said)
 
+    def test_misheard_lamp(self):
+        for said in ('Turn on my lap.', 'Turn on my load.', 'Turn off my laptop.', 'Switch the lamb off',
+                     'Turn off the lab'):
+            self.assertEqual(parse(said), Command('lamp_on_off'), said)
+        for said in ('Load the dishwasher', 'Turn on lap', 'Turn over.', 'My laptop is off', 'Turn on laptop mode'):
+            self.assertNotEqual(parse(said), Command('lamp_on_off'), said)
+
     def test_not_lamp_commands(self):
         for said in ('the book', 'sun', 'Night', 'Read the book', 'What time does the lamp store close?',
                      'Buy a new lamp', 'Is the light on in the kitchen?'):
@@ -156,6 +188,55 @@ class LampTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 1, stdout='', stderr='the remote is transmitting')
         with self.assertRaises(RuntimeError):
             Lamp({'command': ['send']}, fail).press('lamp_on_off')
+
+
+class PhoneTests(unittest.TestCase):
+    CONFIG = {'token': 't', 'ha_url': 'http://ha:8123/', 'notify': 'mobile_app_lc_3',
+              'tracker': 'device_tracker.lc_3'}
+
+    def test_phone_phrases(self):
+        for said in ('Find my phone.', 'Hey Clippy, where\'s my phone?', "I can't find my iPhone!",
+                     'Ping my phone, please.', 'Ring my phone', 'Make my phone ring.', 'Where did I put my phone'):
+            self.assertEqual(parse(said), Command('phone_ping'), said)
+        for said in ('Call mom on my phone', 'Text mom I lost my phone', 'Where is my wallet',
+                     'My phone is dying'):
+            self.assertIsNone(parse(said), said)
+
+    def opener(self, tracker, calls):
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+        def open_(request, timeout):
+            calls.append((request.get_method(), request.full_url, request.data and json.loads(request.data)))
+            return Response(json.dumps(tracker if request.get_method() == 'GET' else []).encode())
+        return open_
+
+    def test_ping_sends_a_critical_alert_and_says_where(self):
+        calls = []
+        tracker = {'state': 'home', 'last_updated': '2026-10-21T20:00:00+00:00'}
+        phone = controls.Phone(self.CONFIG, self.opener(tracker, calls))
+        now = datetime(2026, 10, 21, 20, 4, tzinfo=timezone.utc)
+        self.assertEqual(phone.ping(now), 'Ringing your phone. It was last at home 4 minutes ago.')
+        method, url, body = calls[0]
+        self.assertEqual((method, url), ('POST', 'http://ha:8123/api/services/notify/mobile_app_lc_3'))
+        self.assertEqual(body['data']['push']['sound']['critical'], 1)
+        self.assertEqual(calls[1][:2], ('GET', 'http://ha:8123/api/states/device_tracker.lc_3'))
+
+    def test_where(self):
+        now = datetime(2026, 10, 21, 22, 0, tzinfo=timezone.utc)
+        self.assertEqual(controls.Phone.where({'state': 'not_home', 'last_updated': '2026-10-21T20:00:00+00:00'}, now),
+                         ' It was last away from home 2 hours ago.')
+        self.assertEqual(controls.Phone.where({'state': 'Work', 'last_updated': '2026-10-21T21:59:30+00:00'}, now),
+                         ' It was last at Work a moment ago.')
+        self.assertEqual(controls.Phone.where({'state': 'unknown'}, now), '')
+
+    def test_location_failure_still_rings(self):
+        calls = []
+        phone = controls.Phone(self.CONFIG, self.opener({'state': 'home'}, calls))  # no last_updated
+        self.assertEqual(phone.ping(), 'Ringing your phone.')
+        self.assertEqual(calls[0][0], 'POST')
 
 
 class Recorder:

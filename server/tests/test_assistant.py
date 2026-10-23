@@ -663,7 +663,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_jev_can_discard_an_accidental_trigger(self):
         class Router:
-            def decide(self, text): return 'accidental', 0.9
+            def decide(self, text, recent=None): return 'accidental', 0.9
         self.session.jev = Router()
         await self.say('and then she told him the whole story')
         await self.until('transcribing')
@@ -673,7 +673,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_jev_failure_still_reaches_instinct(self):
         class Router:
-            def decide(self, text): raise RuntimeError('Jev 529: overloaded')
+            def decide(self, text, recent=None): raise RuntimeError('Jev 529: overloaded')
         self.session.jev = Router()
         await self.say('What assignments are due?')
         await self.until('audio_end')

@@ -111,6 +111,14 @@ lamp:
   # Run with the system Python, which has pigpio. Empty: lamp commands say it isn't set up.
   command: []
   # command: [/usr/bin/python3, /home/user/rf-lamp/send.py]
+phone:
+  # "Find my phone": rings the phone with a Home Assistant critical alert through the
+  # Companion app (it sounds on silent and in a Focus), then says where HA last saw it.
+  # token is a long-lived access token (HA profile > Security). Empty: not set up.
+  token: ""
+  ha_url: http://127.0.0.1:8123
+  notify: mobile_app_lc_3          # the notify service, without "notify."
+  tracker: device_tracker.lc_3
 jev:
   # Optional. TypeSafe's Jev routes what the grammar doesn't recognize: a request for
   # Instinct, a device command, a cancellation, or an accidental trigger. The transcript
