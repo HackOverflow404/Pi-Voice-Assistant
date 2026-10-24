@@ -73,6 +73,10 @@ whatsapp:
   instruction: Respond using an audio message
   # For this long after each request, every voice note the contact sends is played (0: replies only).
   voice_window_seconds: 600
+  # false: only voice notes are played. Text messages are never read aloud, and don't count as the
+  # answer (the contact may send an unrelated update first); a text-only answer is shown on the
+  # Echo once reply_timeout_seconds runs out.
+  speak_text: true
 tts:
   # piper: local voice (models.piper). deepgram: Aura-2 cloud voices, far more natural and
   # no load on the Pi, but reply text is sent to Deepgram. Piper remains the fallback.

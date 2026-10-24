@@ -76,7 +76,10 @@ class WhatsApp:
         Follow-ups within reply_settle_seconds of the previous one are joined, since chat
         assistants often answer in several bubbles. The contact's emoji reactions to the
         request are passed to on_reaction as they arrive; they are not the reply. A reply with
-        voice notes comes back as a Reply; text alone as a string."""
+        voice notes comes back as a Reply; text alone as a string. With speak_text off only a voice note answers: texts
+        don't end the wait (the contact may send unrelated updates first), and if no voice note
+        comes they return at the deadline as a Reply without voice notes, to show, not speak."""
+        speak_text = self.config.get('speak_text', True)
         texts, voice, after, settle_until = [], [], 0, None
         while not stop.is_set():
             end = settle_until or deadline
@@ -103,9 +106,9 @@ class WhatsApp:
                 elif message['text']:
                     texts.append(message['text'])
                 after = max(after, message['seq'])
-            if found:
+            if found and speak_text:
                 settle_until = time.time() + self.config['reply_settle_seconds']
-        if voice:
+        if voice or (texts and not speak_text and not stop.is_set()):
             return Reply('\n\n'.join(texts), voice)
         if texts:
             return '\n\n'.join(texts)

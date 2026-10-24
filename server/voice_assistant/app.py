@@ -60,6 +60,7 @@ def load_config(path):
         raise ValueError('Set whatsapp.bridge_url')
     if messenger == 'whatsapp':
         w.setdefault('voice_window_seconds', 600)
+        w.setdefault('speak_text', True)
         if not 0 <= w['voice_window_seconds'] <= 3600:
             raise ValueError('whatsapp.voice_window_seconds must be 0-3600')
     if messenger == 'sms':
@@ -474,11 +475,15 @@ class Session:
             raise
         if isinstance(raw, Reply):  # voice notes: play them, then any text that came with them
             text = speakable(raw.text)[:w['max_reply_chars']]
+            spoken = text and w.get('speak_text', True)  # else the text is only shown
             self.reply = text or VOICE_REPLY
             self.store.update(self.message_id, 'replied', self.reply)
-            await self.play_voice(raw.voice, audio_id=f'voice-{uuid.uuid4().hex[:8]}' if text else None)
-            if text:
+            if raw.voice:
+                await self.play_voice(raw.voice, audio_id=f'voice-{uuid.uuid4().hex[:8]}' if spoken else None)
+            if spoken:
                 await self.speak(text)
+            elif not raw.voice:
+                self.store.update(self.message_id, 'done')
             return
         self.reply = speakable(raw)[:w['max_reply_chars']]
         self.store.update(self.message_id, 'replied', self.reply)
@@ -498,7 +503,7 @@ class Session:
             # A crash between sending and commit is ambiguous. Keep watching for the reply;
             # never resend automatically, which could cause duplicate external actions.
             await self.wait_and_speak(latest['created'])
-        elif latest['status'] == 'replied' and self.reply == VOICE_REPLY:
+        elif latest['status'] == 'replied' and (self.reply == VOICE_REPLY or not self.chat.get('speak_text', True)):
             self.store.update(self.message_id, 'done')  # the voice note was already marked played
         elif latest['status'] == 'replied':
             await self.speak(self.reply)

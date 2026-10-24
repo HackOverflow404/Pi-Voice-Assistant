@@ -321,6 +321,21 @@ class WhatsAppTests(unittest.TestCase):
         reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
         self.assertEqual(reply, Reply('', ['V1']))
 
+    def test_without_speak_text_a_text_does_not_end_the_wait(self):
+        self.client.config['speak_text'] = False
+        FakeBridge.replies = [dict(seq=1, timestamp=1001, text='Job updates.'),
+                              dict(seq=2, timestamp=1002, id='V1', text='', audio=True)]
+        reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
+        self.assertEqual(reply, Reply('Job updates.', ['V1']))
+
+    def test_without_speak_text_texts_alone_come_back_at_the_deadline(self):
+        self.client.config['speak_text'] = False
+        FakeBridge.replies = [dict(seq=1, timestamp=1001, text='Two things are due.')]
+        started = time.monotonic()
+        reply = self.client.wait_reply('ABC', 1000, time.time() + 1.5, threading.Event())
+        self.assertEqual(reply, Reply('Two things are due.', []))
+        self.assertGreater(time.monotonic() - started, 1)
+
     def test_voice_notes_and_their_audio(self):
         FakeBridge.voice = [dict(seq=2, timestamp=990, id='OLD'), dict(seq=3, timestamp=1005, id='V2')]
         found, seq = self.client.voice(1000, 0, 1)
@@ -872,6 +887,20 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.store.voice_played('V1'))
         await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': 'WA1'}))
         await self.until('idle')
+        self.assertEqual(self.store.latest()['status'], 'done')
+
+    async def test_without_speak_text_text_is_shown_not_spoken(self):
+        self.config['whatsapp']['speak_text'] = False
+        self.session.messenger.wait_reply = lambda *args: Reply('Job updates.', ['V1'])
+        self.session.messenger.media = lambda message_id: b'OggS'
+        with patch('voice_assistant.app.voice_wav', lambda data: FakeEngines().synthesize('')):
+            await self.speak_request()
+            events = await self.until('audio_start')
+        self.assertEqual(events[-1]['id'], 'WA1')  # only the voice note plays, as the reply
+        self.assertEqual(self.session.reply, 'Job updates.')
+        await self.socket.incoming.put(json.dumps({'type': 'playback_done', 'id': 'WA1'}))
+        after = await self.until('idle')
+        self.assertFalse([e for e in after if isinstance(e, dict) and e.get('type') == 'audio_start'])
         self.assertEqual(self.store.latest()['status'], 'done')
 
     async def test_voice_notes_within_the_window_are_played_once(self):

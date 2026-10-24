@@ -202,7 +202,9 @@ away, once per emoji; the actual reply is still read when it arrives. Every requ
 Echo as it is (the bridge downloads it, ffmpeg turns it into a WAV). For
 `whatsapp.voice_window_seconds` (10 minutes) after each request, any other voice note the contact
 sends is played too, whether or not it answers the request; each is played once, even across
-reconnects and restarts. A text reply is cleaned for speech (sign-off,
+reconnects and restarts. With `whatsapp.speak_text: false` only voice notes are played: the wait
+goes on until one arrives, texts are never read aloud, and a text-only answer is shown on the
+Echo when `reply_timeout_seconds` runs out. A text reply is cleaned for speech (sign-off,
 formatting marks, emoji and links removed) and spoken one sentence at a time, so
 playback starts after the first sentence is synthesized. Unlinking the device on the
 phone logs the bridge out; pair again to restore it.
