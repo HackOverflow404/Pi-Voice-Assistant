@@ -74,9 +74,11 @@ class WhatsApp:
         conversation, so the bridge decides which messages answer it (see repliesTo in
         bridge/main.go); `since` is the fallback if the bridge no longer knows the request.
         Follow-ups within reply_settle_seconds of the previous one are joined, since chat
-        assistants often answer in several bubbles. The contact's emoji reactions to the
-        request are passed to on_reaction as they arrive; they are not the reply. A reply with
-        voice notes comes back as a Reply; text alone as a string. With speak_text off only a voice note answers: texts
+        assistants often answer in several bubbles. A voice note ends the wait at once, so it
+        starts playing sooner; voice notes after it are played from the voice window instead
+        (see watch_voice in app.py). The contact's emoji reactions to the request are passed to
+        on_reaction as they arrive; they are not the reply. A reply with voice notes comes back
+        as a Reply; text alone as a string. With speak_text off only a voice note answers: texts
         don't end the wait (the contact may send unrelated updates first), and if no voice note
         comes they return at the deadline as a Reply without voice notes, to show, not speak."""
         speak_text = self.config.get('speak_text', True)
@@ -106,6 +108,8 @@ class WhatsApp:
                 elif message['text']:
                     texts.append(message['text'])
                 after = max(after, message['seq'])
+            if voice:
+                break
             if found and speak_text:
                 settle_until = time.time() + self.config['reply_settle_seconds']
         if voice or (texts and not speak_text and not stop.is_set()):

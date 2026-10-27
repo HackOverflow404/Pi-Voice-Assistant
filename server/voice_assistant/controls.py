@@ -20,7 +20,8 @@ import urllib.request
 from . import skills
 
 # The lamp's 12 remote buttons: action -> (rf-lamp button name, what it does, spoken reply).
-# The lamp can't report its state, so on/off is a toggle and is confirmed as one.
+# The lamp can't report its state, so on/off is one toggle button; lamp_reply confirms it in
+# the words the user asked with.
 LAMP = {
     'lamp_on_off': ('on/off', 'Turn the desk lamp on or off (one toggle button).', 'Toggled the lamp.'),
     'lamp_timer': ('1h', "Start the lamp's one-hour auto-off timer.", 'The lamp will turn off in an hour.'),
@@ -34,6 +35,8 @@ LAMP = {
     'lamp_milk': ('milk', "Set the lamp to its soft milky white preset.", 'Lamp on milk mode.'),
     'lamp_book': ('book', "Set the lamp to its reading (book) preset.", 'Reading light on.'),
     'lamp_laptop': ('laptop', "Set the lamp to its laptop or screen-work preset.", 'Lamp on laptop mode.'),
+    'lamp_goodnight': ('on/off', 'Saying goodnight or going to sleep: turn the lamp off for the night.',
+                       'Goodnight! Turned off the lamp.'),
 }
 ACTIONS = ('pairing_on', 'pairing_off', 'system_up', 'system_down', 'system_set',
            'ai_up', 'ai_down', 'ai_set', 'phone_ping', *LAMP)
@@ -145,6 +148,7 @@ LAMP_MISHEARD = r'(?:the |my |desk )+(?:lap|laps|lab|lamb|lump|load|loud|land|la
 TURN = r'(?:turn|switch|flip|put)'
 LAMP_PATTERNS = [
     (re.compile(rf'{TURN} (?:on|off) {LAMP_MISHEARD}|{TURN} {LAMP_MISHEARD} (?:on|off)'), 'lamp_on_off'),
+    (re.compile(r'(?:good ?night|nighty? night|night night)(?: everyone| all| buddy)?'), 'lamp_goodnight'),
     (re.compile(rf'(?:{TURN} (?:on|off) {LAMP_WORD}|{TURN} {LAMP_WORD} (?:on|off)|{LAMP_WORD} (?:on|off)|'
                 rf'toggle {LAMP_WORD})'), 'lamp_on_off'),
     # The lamp must be named: "set a one hour timer" alone is the timers skill's.
@@ -169,6 +173,19 @@ PRESET = '|'.join(sorted(PRESETS, key=len, reverse=True))
 PRESET_PATTERN = re.compile(
     rf'(?:(?:set|switch|put|change|turn) {LAMP_WORD} (?:to|on|onto) (?:the )?|{LAMP_WORD} (?:to |on )?(?:the )?|'
     rf'(?:the )?)(?P<preset>{PRESET})(?: (?P<mode>mode|preset|setting|light))?(?: on {LAMP_WORD})?')
+
+
+def lamp_reply(action, text):
+    """What to say after pressing a lamp button. On and off are the same button, so the reply
+    echoes what was asked for ("turn on my lamp" -> "Turned on the lamp."), and only says
+    "toggled" when the request named neither."""
+    if action == 'lamp_on_off':
+        said = normalize(text)
+        if re.search(r'\b(?:off|out)\b', said):
+            return 'Turned off the lamp.'
+        if re.search(r'\bon\b', said):
+            return 'Turned on the lamp.'
+    return LAMP[action][2]
 
 
 def parse_lamp(said):
@@ -228,12 +245,27 @@ def parse(text):
 # ---------------------------------------------------------------- Jev (fallback router)
 
 CONTEXT = ('Speech-to-text of what a microphone on an Echo Show speaker picked up just after it heard '
-           'something like its wake word "Hey Clippy". The microphone hears the whole room, and the wake '
-           'word sometimes fires by mistake on similar-sounding speech, TV or music, so the transcript may '
-           'be words that were never meant for the assistant at all. The microphone is quiet and muffled, so '
-           'speech recognition garbles short lamp commands: "lamp" comes out as "lap", "load", "lab" or '
-           '"laptop", and "turn off" as "turn over" or "turn off now". When "recent" is given, it is the '
-           'user\'s last exchange with Instinct, and this transcript may continue it.')
+           'something like its wake word "Hey Clippy". The speaker is a university student\'s desk '
+           'assistant: it handles a few things itself (the lamp, volume, timers, finding the phone, the '
+           'time and weather, and MTD bus times and which bus to take) and '
+           'passes everything else to Instinct, the student\'s personal AI assistant. The microphone hears '
+           'the whole room, and the wake word sometimes fires by mistake on similar-sounding speech, TV or '
+           'music, so the transcript may be words that were never meant for the assistant at all. The '
+           'microphone is quiet and muffled, so speech recognition garbles short lamp commands: "lamp" comes '
+           'out as "lap", "load", "lab" or "laptop", and "turn off" as "turn over" or "turn off now". When "recent" is given, it is the user\'s last exchange with '
+           'Instinct, and this transcript may continue it.')
+
+# What Instinct can do, so Jev knows which requests are its (jev.instinct in config.yaml replaces it).
+INSTINCT = ('Instinct is the user\'s personal AI assistant, reached by message, which knows their life and '
+            'acts for them: their calendar and schedule (adding, moving or changing events, planning or '
+            'replanning the day around what is left to do, and anything about events beyond today and '
+            'tomorrow); coursework (assignments, homework and what is due, '
+            'exams, PrairieLearn and PrairieTest, booking CBTF exam slots, open lab sign-ups, class meetings '
+            'and rooms); student organizations and campus events (MicroTech general meetings, EOH); their to-do list and time tracker; job applications and online assessments; email; '
+            'texts to other people; reminders and notes; groceries, orders and what to cook; and anything '
+            'that needs knowledge or a web search: facts, explanations, news, TV releases, travel times '
+            '(but not local bus times or which local bus to take: the speaker checks those itself), '
+            'opening hours and advanced math.')
 
 # Asked alongside the route: a confident "no" discards the transcript whatever the route says, so
 # a remark or overheard sentence is never sent on just because it could be read as a message.
@@ -244,35 +276,46 @@ ADDRESSED = {
            'instruction or request to it. Anything that starts by asking it to ' + INSTRUCTION_VERBS +
            ' is meant for it, whatever the rest says, because the rest is the content to send or keep: '
            '"text mom I\'m running late", "text dad happy birthday", "note that my exam is on Friday" '
-           'and "tell Instinct I finished the assignment" are all meant for the assistant. So is information '
-           'given to Instinct even with no request in it, when it answers a question Instinct just asked '
-           'or adds details or corrections to a recent request (see "recent"): after Instinct asks for a '
-           'birthday, "the birthday is October 25, and it\'s not the same person" is meant for it.',
+           'and "tell Instinct I finished the assignment" are all meant for the assistant. So is a statement '
+           'that asks it to act or corrects something it did: "I just finished eating, replan my day", '
+           '"I can\'t make class Monday, so find me an open lab", "change my calendar, the event actually '
+           'runs from seven to eight". So is information given to Instinct even with no request in it, '
+           'when it answers a question Instinct just asked or adds details or corrections to a recent '
+           'request (see "recent"): after Instinct asks for a birthday, "the birthday is October 25, and '
+           'it\'s not the same person" is meant for it.',
     'no': 'Not meant for the assistant as a command, question or message: a remark, reaction or '
           'exclamation ("ugh, I\'m so tired", "that was amazing"); thinking out loud or a question to '
           'oneself ("where did I put my keys"); a rhetorical question; talking to another person in the '
           'room or on a call, including suggestions and invitations to them ("come on, let\'s go '
           'shopping", "let\'s grab food"); talking about the assistant rather than to it ("Clippy never hears me"); '
           'narrating or retelling what someone said; reading text aloud, singing or quoting; dialogue '
-          'from a TV, video, game or song; or a fragment, filler or noise. A statement with no '
-          'instruction to the assistant ("I\'m running late again") is not meant for it, unless it answers '
-          'or follows up the recent exchange with Instinct.',
+          'from a TV, video, game or song; or a fragment, filler or noise. A statement about the speaker\'s '
+          'own plans or day that asks nothing of the assistant ("I can\'t make my 9 AM class Monday", '
+          '"I also need to make food for dinner", "ugh, I\'m running late again") is usually conversation '
+          'in the room, so it is not meant for it, unless it answers or follows up the recent exchange with '
+          'Instinct.',
 }
 ROUTES = {
-    'instinct': 'A question, request or message spoken to the voice assistant on purpose, that the '
-                'speaker cannot handle by itself: knowledge, assignments, email, reminders, notes, messages '
-                'to send, and advanced math (algebra, calculus, statistics, proofs, unit conversions, word '
-                'problems). An instruction to ' + INSTRUCTION_VERBS + ' something belongs here even when '
-                'what follows is a plain statement, such as "text dad happy birthday". So does an answer to a '
-                'question Instinct just asked, or more details, context or a correction for a recent '
-                'request, even with no request of its own.',
+    'instinct': 'A question, request, message or update spoken to the assistant on purpose that the '
+                'speaker cannot handle by itself, so it goes to Instinct. ' + INSTINCT + ' Statements '
+                'that ask it to act on the user\'s plans, and corrections to what Instinct did, belong here; '
+                'a bare statement about the user\'s day with no request in it does not. An '
+                'instruction to ' + INSTRUCTION_VERBS + ' something belongs here even when what follows is a '
+                'plain statement, such as "text dad happy birthday". So does a question to the assistant '
+                'about how the user\'s work, applications or plans are going. So does an answer to a question '
+                'Instinct just asked, or more details, context or a correction for a recent request, even '
+                'with no request of its own.',
     'device': 'Something this speaker does itself, asked for or instructed rather than merely mentioned: '
               'Bluetooth pairing mode or volume; the desk lamp (on or '
               'off, brighter, dimmer, warmer, cooler, a one-hour timer, or presets like sun, night, milk, '
               'reading and laptop); ringing the user\'s phone to find it; setting, pausing, '
               'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
-              'stopwatch; saying the current time or date; simple arithmetic; or the local weather or the '
-              'user\'s calendar events. Not advanced math, assignments, email or general knowledge.',
+              'stopwatch; saying the current time or date; simple arithmetic; the local weather; when the '
+              'next MTD bus leaves a stop, or which bus to take to a place in Champaign-Urbana; or '
+              'reading out the events already on the user\'s calendar today or tomorrow ("what\'s on my '
+              'calendar tomorrow", "what\'s my next meeting"). Not assignments, '
+              'homework, what is due, exams, to-do lists, planning, scheduling, advanced math, email or '
+              'general knowledge: those are Instinct\'s.',
     'cancel': 'The speaker is cancelling or retracting their request, for example "never mind", '
               '"ignore that", "actually cancel" or "forget it".',
     'accidental': 'Not meant for the assistant: a remark or reaction, thinking out loud, talking to '
@@ -304,7 +347,15 @@ DEVICE_ACTIONS = {
     'date_query': 'Ask today\'s date or day of the week.',
     'math': 'Simple arithmetic: adding, subtracting, multiplying, dividing, percentages, powers or square roots of numbers.',
     'weather_query': 'Ask about the local weather or temperature, now or tomorrow.',
-    'calendar_query': 'Ask what is on the user\'s calendar or schedule today or tomorrow, or what is next.',
+    'calendar_query': 'Ask which events are on the user\'s calendar today or tomorrow, or what the next '
+                      'event is. Not assignments, homework, what is due, exams, deadlines, to-do items or '
+                      'planning the day.',
+    'bus_query': 'Ask when the next MTD bus leaves a stop, optionally for a route by number or name '
+                 '("when\'s the next bus", "when does the 22 come", "next Illini at the Union", "what buses '
+                 'are coming"). Not a destination: that is bus_trip.',
+    'bus_trip': 'Ask which bus to take to get to a place in Champaign-Urbana, or when the next bus to a '
+                'place leaves ("which bus should I take to Target", "how do I get to the Union by bus", '
+                '"next bus to Siebel"). Not travel to other cities.',
     'phone_ping': 'Ring the user\'s phone so they can find it, or say where it is ("find my phone", '
                   '"where\'s my phone", "I can\'t find my phone").',
     **{action: description for action, (_, description, _) in LAMP.items()},
@@ -320,6 +371,9 @@ class Jev:
         self.model = config.get('model', 'jev-latest')
         self.min_probability = config.get('min_probability', 0.6)
         self.timeout = config.get('timeout_seconds', 3)
+        self.routes = dict(ROUTES)
+        if config.get('instinct'):
+            self.routes['instinct'] = ROUTES['instinct'].replace(INSTINCT, config['instinct'].strip())
 
     def request(self, text, recent=None):
         state = {'transcript': text, 'context': CONTEXT}
@@ -333,7 +387,7 @@ class Jev:
                                                   'a question for it, or a message for it to handle?',
                                   'criteria': ADDRESSED},
                     'route': {'type': 'choice', 'instructions': 'What should happen with this transcript?',
-                              'criteria': ROUTES},
+                              'criteria': self.routes},
                     'device_action': {'type': 'choice',
                                       'instructions': 'If the speaker should do this itself, which action?',
                                       'criteria': DEVICE_ACTIONS}}}

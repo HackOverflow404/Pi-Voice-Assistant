@@ -166,6 +166,40 @@ func (b *bridge) voiceFrom(c *contact, since, after int64) []message {
 	return found
 }
 
+// voiceNote is a received voice note. Its audio is downloaded as soon as it arrives, so /media
+// doesn't wait on WhatsApp's media servers when the voice server asks for it.
+type voiceNote struct {
+	info *waE2E.AudioMessage
+	done chan struct{} // closed once the download has finished or failed
+	data []byte        // nil if the download failed or the audio was dropped; guarded by b.mu
+}
+
+// keepAudio is how many downloaded voice notes are held in memory (the Pi has little).
+const keepAudio = 16
+
+func (b *bridge) prefetch(id string, n *voiceNote) {
+	defer close(n.done)
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	data, err := b.client.Download(ctx, n.info)
+	if err != nil {
+		log.Printf("voice note %s: download failed: %v", id, err)
+		return
+	}
+	log.Printf("voice note %s downloaded in %.1f s", id, time.Since(started).Seconds())
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n.data = data
+	b.cached = append(b.cached, id)
+	if len(b.cached) > keepAudio {
+		if old := b.audio[b.cached[0]]; old != nil {
+			old.data = nil
+		}
+		b.cached = b.cached[1:]
+	}
+}
+
 // contact is one chat partner, known by phone-number JID and possibly a LID alias;
 // incoming messages may be addressed with either.
 type contact struct {
@@ -180,9 +214,10 @@ type bridge struct {
 
 	mu       sync.Mutex
 	seq      int64
-	messages []message                      // recent incoming one-to-one texts, newest last
-	audio    map[string]*waE2E.AudioMessage // received audio by message ID, for /media
-	changed  chan struct{}                  // closed and replaced whenever a message arrives
+	messages []message             // recent incoming one-to-one texts, newest last
+	audio    map[string]*voiceNote // received audio by message ID, for /media
+	cached   []string              // IDs of voice notes whose audio is held, oldest first
+	changed  chan struct{}         // closed and replaced whenever a message arrives
 	contacts map[string]*contact
 
 	pairMu  sync.Mutex
@@ -218,9 +253,17 @@ func (b *bridge) onEvent(evt any) {
 			FromMe: v.Info.IsFromMe, Quoted: quotedID(v.Message), users: users}
 		if a := v.Message.GetAudioMessage(); a != nil {
 			m.Audio, m.Seconds = true, a.GetSeconds()
+			n := &voiceNote{info: a, done: make(chan struct{})}
 			b.mu.Lock()
-			b.audio[v.Info.ID] = a
+			b.audio[v.Info.ID] = n
 			b.mu.Unlock()
+			if !v.Info.IsFromMe {
+				log.Printf("voice note %s (%d s) arrived %.1f s after it was sent",
+					v.Info.ID, m.Seconds, time.Since(v.Info.Timestamp).Seconds())
+				go b.prefetch(v.Info.ID, n)
+			} else {
+				close(n.done)
+			}
 		}
 		b.record(m)
 	case *events.Connected:
@@ -589,18 +632,28 @@ func (b *bridge) routes() *http.ServeMux {
 	})
 	mux.HandleFunc("GET /media", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
-		a := b.audio[r.URL.Query().Get("id")]
+		n := b.audio[r.URL.Query().Get("id")]
 		b.mu.Unlock()
-		if a == nil {
+		if n == nil {
 			fail(w, 404, errors.New("no received audio with that id"))
 			return
 		}
-		data, err := b.client.Download(r.Context(), a)
-		if err != nil {
-			fail(w, 502, err)
+		select {
+		case <-n.done:
+		case <-r.Context().Done():
 			return
 		}
-		w.Header().Set("Content-Type", a.GetMimetype())
+		b.mu.Lock()
+		data := n.data
+		b.mu.Unlock()
+		if data == nil { // the early download failed, or its audio was dropped since
+			var err error
+			if data, err = b.client.Download(r.Context(), n.info); err != nil {
+				fail(w, 502, err)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", n.info.GetMimetype())
 		w.Write(data)
 	})
 	mux.HandleFunc("GET /replies", func(w http.ResponseWriter, r *http.Request) {
@@ -656,7 +709,7 @@ func main() {
 		log.Fatal(err)
 	}
 	b := &bridge{client: whatsmeow.NewClient(device, waLog.Stdout("wa", *logLevel, false)),
-		changed: make(chan struct{}), contacts: map[string]*contact{}, audio: map[string]*waE2E.AudioMessage{}}
+		changed: make(chan struct{}), contacts: map[string]*contact{}, audio: map[string]*voiceNote{}}
 	b.client.AddEventHandler(b.onEvent)
 	if b.client.Store.ID == nil {
 		log.Print(`not paired: POST {"phone": "..."} to /pair and enter the code on your phone`)

@@ -1,5 +1,5 @@
 """Built-in skills answered on the Pi without Instinct: timers, a stopwatch, the time and
-date, simple arithmetic, and the local weather and calendar.
+date, simple arithmetic, the local weather and calendar, and MTD bus departures.
 
 `parse` recognizes the common wordings instantly (the fast path); Jev picks the skill for
 other wordings and `from_action` then reads the parameters (a duration, an expression)
@@ -18,7 +18,7 @@ import uuid
 
 ACTIONS = ('timer_start', 'timer_pause', 'timer_resume', 'timer_stop', 'timer_query', 'dismiss',
            'stopwatch_start', 'stopwatch_pause', 'stopwatch_resume', 'stopwatch_stop', 'stopwatch_query',
-           'time_query', 'date_query', 'math', 'weather_query', 'calendar_query')
+           'time_query', 'date_query', 'math', 'weather_query', 'calendar_query', 'bus_query', 'bus_trip')
 RING_SECONDS = 60  # a finished timer rings this long unless dismissed
 
 
@@ -31,6 +31,9 @@ class Skill:
     expression: str = ''    # math: the expression as it will be read back
     value: float = None     # math: its result
     day: str = 'today'      # calendar_query / weather_query: today or tomorrow
+    stop: str = ''          # bus_query: the stop named ("illini union"); '' for the default stop
+    route: str = ''         # bus_query: a route number ("22"), the words that may name one, or '*' (all)
+    to: str = ''            # bus_trip: where to ("target", "the illini union")
 
 
 # ---------------------------------------------------------------- words and numbers
@@ -301,6 +304,59 @@ CALENDAR_QUERY = re.compile(r'(?:what s|what is|whats) (?:on )?(?:my )?(?:calend
                             r'what(?: s| is) my next (?:event|meeting|class)|when is my next (?:event|meeting|class)|'
                             r'what(?: do i have| is| s) (?:on )?(?:my calendar )?(?:today|tomorrow)|'
                             r'what s on (?:today|tomorrow)')
+# Bus departures: a question or request that mentions the bus (or "the next 22"). Trip planning,
+# fares and remarks about a bus ("I missed the bus") are Instinct's or nobody's.
+BUS_LEAD = re.compile(r'(?:when|what time|how long|how soon|is|are|any|check|show me|tell me|next|'
+                      r'bus|buses|mtd|where|what)\b')
+BUS_WORD = re.compile(r'\b(?:bus|buses|busses|mtd)\b')
+NUMBER_TOKEN = r'(?:\d{1,3}|' + '|'.join(sorted(set(UNITS) | set(TENS), key=len, reverse=True)) + ')'
+NEXT_ROUTE = re.compile(rf'\bnext {NUMBER_TOKEN}\b')
+NOT_BUS = re.compile(r'\b(?:how do i get|how can i get|directions|plan|trip|ticket|fare|pass|school bus|'
+                     r'bus driver|missed|lost|left my|joke|story)\b')
+BUS_STOP = re.compile(r'\b(?:at|from) (?:the )?(?P<stop>[a-z0-9][a-z0-9 ]*?)(?: (?:bus )?stop| station)?$')
+ALL_BUSES = re.compile(r'\b(?:all|any|every|which|what) (?:the )?(?:bus|buses|busses)\b|\bbuses\b')
+# "Which bus should I take to Target?", "how do I get to the Union by bus", "next bus to Walmart"
+BUS_TRIP = re.compile(
+    r'(?:(?:which|what) (?:bus|buses|route)(?: (?:should|do|can|could) i| to)? ?(?:take|catch|get|ride|go|goes|runs)?|'
+    r'(?:how (?:do|can|should|would) i|how to) (?:get|go)|'
+    r'(?:when s|when is|what time is|is there) (?:the |a )?next bus|'
+    r'(?:is there|any) (?:a )?bus|bus|take the bus|catch a bus)'
+    r'\b.*?\bto (?:get to |go to )?(?:the )?(?P<to>[a-z0-9][a-z0-9 ]*?)'
+    r'(?: (?:by|on the|on a|with the|using the) bus| from [a-z0-9 ]+)?(?: (?:now|today|tonight|right now))?$')
+
+
+def bus_trip(said):
+    """The destination of a which-bus question, or None when it isn't one (or has none)."""
+    match = BUS_TRIP.match(said)
+    if not match or not (BUS_WORD.search(said) or re.search(r'\bby bus\b|\broute\b', said)):
+        return None
+    return Skill('bus_trip', to=match.group('to').strip())
+
+
+def bus_skill(said):
+    """'when s the next 22 at illini union' -> stop 'illini union', route '22'. Without a
+    number, the words stay as `route`: a route name (Illini, Silver Limited) is only known
+    once MTD's route list is loaded, and none named means the default route. 'any bus' or
+    'buses' -> route '*', every route."""
+    stop, rest = '', said
+    match = BUS_STOP.search(said)
+    if match:
+        stop, rest = match.group('stop').strip(), said[:match.start()]
+    if ALL_BUSES.search(rest):
+        return Skill('bus_query', stop=stop, route='*')
+    words = rest.split()
+    for i, word in enumerate(words):
+        if word in UNITS or word in TENS or re.fullmatch(r'\d{1,3}', word):
+            value, _ = read_number(words, i)
+            return Skill('bus_query', stop=stop, route=str(int(value)))
+    return Skill('bus_query', stop=stop, route=rest.strip())
+
+
+def is_bus_query(said):
+    return bool(BUS_LEAD.match(said) and (BUS_WORD.search(said) or NEXT_ROUTE.search(said))
+                and not NOT_BUS.search(said))
+
+
 LABEL_JUNK = re.compile(r'\b(?:a|an|the|my|set|start|create|make|put|on|up|new|for|of|called|named|'
                         r'\d+(?:\.\d+)?|' + '|'.join(sorted(NUMBER_WORD | set(DURATION_UNITS) | {'and', 'half'},
                                                            key=len, reverse=True)) + r')\b')
@@ -377,6 +433,11 @@ def parse(text, ringing=False):
         return Skill('weather_query', day='tomorrow' if 'tomorrow' in said else 'today')
     if CALENDAR_QUERY.fullmatch(said):
         return Skill('calendar_query', day='tomorrow' if 'tomorrow' in said else 'today')
+    trip = bus_trip(said)
+    if trip:
+        return trip
+    if is_bus_query(said):
+        return bus_skill(said)
     math_answer = parse_math(text)
     if math_answer:
         return Skill('math', expression=math_answer[0], value=math_answer[1])
@@ -396,6 +457,12 @@ def from_action(action, text):
         return Skill('math', expression=answer[0], value=answer[1]) if answer else None
     if action in ('weather_query', 'calendar_query'):
         return Skill(action, day='tomorrow' if 'tomorrow' in said else 'today')
+    if action == 'bus_query':
+        return bus_trip(said) or bus_skill(said)  # "next bus to target" is a trip
+    if action == 'bus_trip':
+        match = re.search(r'\bto (?:get to |go to )?(?:the )?(?P<to>[a-z0-9][a-z0-9 ]*?)'
+                          r'(?: (?:by|on the|on a) bus)?$', said)
+        return Skill('bus_trip', to=match.group('to').strip() if match else '')
     return Skill(action)
 
 

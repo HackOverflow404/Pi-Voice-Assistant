@@ -17,7 +17,7 @@ import time
 import uuid
 import wave
 
-from . import agenda, chime, controls, skills
+from . import agenda, chime, controls, mtd, skills
 from .audio import (FRAME_SECONDS, Capture, Framer, is_cancel_phrase, is_noise_transcript, normalize, rms,
                     speech_threshold, wake_is_plausible)
 from .speech import chunks, speakable
@@ -115,6 +115,16 @@ def load_config(path):
     phone.setdefault('ha_url', 'http://127.0.0.1:8123')
     phone.setdefault('notify', 'mobile_app_lc_3')
     phone.setdefault('tracker', 'device_tracker.lc_3')
+    mtd = c.setdefault('mtd', {}) or {}
+    c['mtd'] = mtd
+    for key, value in dict(api_key='', url='https://api.mtd.dev', default_stop='Campus Circle',
+                           default_route='22', nearby_meters=400, destination_meters=400,
+                           max_options=2).items():
+        mtd.setdefault(key, value)
+    if not (50 <= mtd['nearby_meters'] <= 2000 and 50 <= mtd['destination_meters'] <= 2000 and
+            1 <= mtd['max_options'] <= 4 and mtd['default_stop']):
+        raise ValueError('mtd.nearby_meters and destination_meters must be 50-2000, max_options 1-4, '
+                         'and default_stop set')
     jev = c.setdefault('jev', {}) or {}
     c['jev'] = jev
     jev.setdefault('api_key', '')
@@ -227,13 +237,14 @@ def system_stats():
 
 class Session:
     def __init__(self, ws, config, engines, store, calendar=None, levels=None, echo=None, jev=None,
-                 clock=None, weather=None, lamp=None, hub=None, messenger=None, phone=None):
+                 clock=None, weather=None, lamp=None, hub=None, messenger=None, phone=None, buses=None):
         self.ws, self.config, self.engines, self.store = ws, config, engines, store
         self.levels, self.echo, self.jev = levels, echo, jev  # device commands; jev is optional
         self.lamp = lamp  # controls.Lamp, or None when lamp.command isn't configured
         self.phone = phone  # controls.Phone, or None when phone.token isn't configured
         self.hub = hub  # hass.Hub (Clippy in Home Assistant), or None when mqtt.host isn't set
         self.clock, self.weather = clock, weather  # built-in skills; the clock is shared
+        self.buses = buses  # mtd.Mtd, or None when mtd.api_key isn't configured
         self.calendar = calendar  # agenda.Shared, or None when no calendars are configured
         # The active chat's settings and client; the SMS client is shared by all sessions,
         # since it watches the inbox even while no Echo is connected.
@@ -354,7 +365,7 @@ class Session:
         self.playback_id = audio_id or self.message_id
         self.playback_error = False
         self.played.clear()
-        clips = []
+        clips, started = [], time.monotonic()
         for message_id in message_ids:
             self.store.mark_voice(message_id)
             try:
@@ -364,7 +375,8 @@ class Session:
                 LOG.warning('Voice note %s unavailable: %s', message_id, exc)
         if not clips:
             raise RuntimeError('No playable voice notes')
-        LOG.info('Playing %d voice notes (%.0f s)', len(clips), sum(d for _, d in clips))
+        LOG.info('Playing %d voice notes (%.0f s), fetched and converted in %.1f s', len(clips),
+                 sum(d for _, d in clips), time.monotonic() - started)
         for seq, (wav, duration) in enumerate(clips):
             await asyncio.shield(asyncio.create_task(
                 self.transfer(self.playback_id, seq, seq == len(clips) - 1, wav, duration)))
@@ -536,7 +548,10 @@ class Session:
         capture = None
         levels = deque(maxlen=50)  # last 4 s of frame loudness while waiting for the wake word
         room = deque(maxlen=50)    # the same while nothing is in progress: the room's own noise
+        history = deque(maxlen=40)  # the last 3.2 s of raw audio, saved with each wake decision
+        near = None  # the best score of a wake word that is scoring below the threshold
         audio = self.config['audio']
+        near_floor = audio.get('wake_near_miss', 0.2)
         while True:
             try:
                 frame = await asyncio.wait_for(self.queue.get(), 15)
@@ -553,10 +568,21 @@ class Session:
                 continue
             busy = self.busy()
             levels.append(rms(frame))
+            history.append(frame)
             if not busy:
                 room.append(levels[-1])
             score = await self.blocking(self.engines.predict, frame)
+            # A phrase that scored below the threshold may be a missed "Hey Clippy": log and keep
+            # it once its score falls away, so the threshold can be tuned on real misses.
+            if near_floor <= score < audio['wake_threshold']:
+                near = max(near or 0.0, score)
+            elif near is not None and score < near_floor:
+                LOG.info('Wake word near miss (score %.2f) while %s: phrase peak %d', near, self.status,
+                         max(list(levels)[-15:]))
+                self.save_wake(history, 'near', near)
+                near = None
             if score >= audio['wake_threshold']:
+                near = None
                 recent = list(levels)
                 before = recent[:-15]
                 # While the Echo is talking its own voice is the background the wake phrase
@@ -565,6 +591,7 @@ class Session:
                 if not wake_is_plausible(check, recent[-15:], before):
                     LOG.info('Ignored wake word (score %.2f): phrase peak %d, room %d', score,
                              max(recent[-15:]), sorted(before)[len(before) // 5] if before else 0)
+                    self.save_wake(history, 'ignored', score)
                     self.engines.reset()
                     continue
                 if busy:
@@ -576,6 +603,7 @@ class Session:
                     threshold = speech_threshold(audio, recent[-15:], recent)
                 LOG.info('Wake word (score %.2f): phrase peak %d, noise %d, speech threshold %d', score,
                          max(recent[-15:]), sorted(recent)[len(recent) // 5], threshold)
+                self.save_wake(history, 'wake', score)
                 self.engines.reset()
                 capture = Capture(audio, threshold)
                 await self.set_status('listening')
@@ -747,7 +775,7 @@ class Session:
                     self.reply = "The lamp isn't set up yet."
                 else:
                     await self.blocking(self.lamp.press, command.action)
-                    self.reply = controls.LAMP[command.action][2]
+                    self.reply = controls.lamp_reply(command.action, self.transcript)
             elif command.action == 'phone_ping':
                 if not self.phone:
                     self.reply = "Finding your phone isn't set up yet."
@@ -842,6 +870,18 @@ class Session:
             return await asyncio.to_thread(self.weather.report, skill.day)
         if a == 'calendar_query':
             return skills.calendar_report(self.calendar.events if self.calendar else None, now, skill.day)
+        if a in ('bus_query', 'bus_trip'):
+            if not self.buses:
+                return "Bus times aren't set up. Add an MTD API key to the config."
+            if a == 'bus_trip' and not skill.to:
+                return 'Where do you want to go? Ask, for example, which bus should I take to the Illini Union.'
+            try:
+                if a == 'bus_trip':
+                    return await asyncio.to_thread(self.buses.plan, skill.to)
+                return await asyncio.to_thread(self.buses.report, skill.stop, skill.route)
+            except mtd.MtdError as exc:
+                LOG.warning('MTD: %s', exc)
+                return "I couldn't reach MTD for bus times right now."
         return ''
 
     def clock_changed(self):
@@ -912,14 +952,29 @@ class Session:
         for old in sorted(folder.glob('*.wav'))[:-5]:
             old.unlink()
 
+    def save_wake(self, frames, label, score):
+        """With audio.debug_save_utterances, the last 3.2 s before a wake decision (accepted,
+        ignored as implausible, or a near miss) in state/wake, the newest 200 kept: material for
+        tuning the threshold or training a verifier on this room and voice."""
+        if not self.config['audio'].get('debug_save_utterances'):
+            return
+        folder = Path(self.config['state_dir']) / 'wake'
+        folder.mkdir(mode=0o700, exist_ok=True)
+        name = time.strftime('%Y%m%d-%H%M%S') + f'-{label}-{score:.2f}.wav'
+        with wave.open(str(folder / name), 'wb') as out:
+            out.setnchannels(1); out.setsampwidth(2); out.setframerate(16000)
+            out.writeframes(b''.join(frames))
+        for old in sorted(folder.glob('*.wav'))[:-200]:
+            old.unlink()
+
     def transcribe(self, pcm):
         if self.config['audio'].get('debug_save_utterances'):
             self.save_utterance(pcm)
         pcm, dechimed = chime.remove(pcm)
         pcm, gain = normalize(pcm)
         text = self.engines.transcribe(pcm)
-        LOG.info('Transcribed %.1f s at gain %.1fx (chime -%.0f dB): %d words', len(pcm) / 32000, gain,
-                 dechimed, len(text.split()))
+        LOG.info('Transcribed %.1f s at gain %.1fx (chime -%.0f dB): %d words: "%s"', len(pcm) / 32000, gain,
+                 dechimed, len(text.split()), text)
         return text
 
     async def telemetry(self):
@@ -991,6 +1046,17 @@ async def serve(config, engines):
             hub.update(voice_volume=level)
         hub = Hub(config['mqtt'], asyncio.get_running_loop(), levels.speech_volume, set_voice_volume)
     clock, weather = skills.Clock(state), skills.Weather()
+    buses = mtd.Mtd(config['mtd']) if config['mtd']['api_key'] else None
+    warmer = None  # keep a reference so the task isn't garbage-collected
+    if buses:
+        async def keep_warm():  # timetables are kept a day; reload them before they expire
+            while True:
+                try:
+                    await asyncio.to_thread(buses.warm)
+                except Exception as exc:
+                    LOG.warning('MTD warm-up failed: %s', exc)
+                await asyncio.sleep(6 * 3600)
+        warmer = asyncio.create_task(keep_warm())  # noqa: F841
     messenger = None  # WhatsApp: one bridge client per session
     if config['messenger'] == 'sms':
         messenger = GoogleVoice(config['sms'], state)
@@ -1002,8 +1068,9 @@ async def serve(config, engines):
                 clock.tick()
             await asyncio.sleep(0.5)
     clock_task = asyncio.create_task(ticker())  # noqa: F841 (kept referenced)
-    LOG.info('Device commands: grammar%s; lamp %s; phone %s', ' + Jev fallback' if jev else ' only (no jev.api_key)',
-             'enabled' if lamp else 'not configured', 'enabled' if phone else 'not configured')
+    LOG.info('Device commands: grammar%s; lamp %s; phone %s; buses %s', ' + Jev fallback' if jev else ' only (no jev.api_key)',
+             'enabled' if lamp else 'not configured', 'enabled' if phone else 'not configured',
+             f"from {config['mtd']['default_stop']}" if buses else 'not configured')
     current = None  # (connection, finished event) of the connected microphone
     calendar = refresher = None  # keep a reference so the task isn't garbage-collected
     if config['calendar']['ical_urls']:
@@ -1040,7 +1107,7 @@ async def serve(config, engines):
         session = None
         try:
             session = Session(ws, config, engines, store, calendar, levels, echo, jev, clock=clock, weather=weather,
-                              lamp=lamp, hub=hub, messenger=messenger, phone=phone)
+                              lamp=lamp, hub=hub, messenger=messenger, phone=phone, buses=buses)
             if hub:
                 hub.attach(session)
             await session.run()

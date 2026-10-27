@@ -57,8 +57,8 @@ def answer(choice, probability, options):
 
 
 class FakeJev(Jev):
-    def __init__(self, route, route_p, action='none', action_p=0.9, addressed=None, addressed_p=0.9):
-        super().__init__({'api_key': 'test'})
+    def __init__(self, route, route_p, action='none', action_p=0.9, addressed=None, addressed_p=0.9, instinct=''):
+        super().__init__({'api_key': 'test', 'instinct': instinct})
         self.response = {'model': 'jev-latest', 'answers': {
             'route': answer(route, route_p, controls.ROUTES),
             'device_action': answer(action, action_p, controls.DEVICE_ACTIONS)}}
@@ -173,8 +173,31 @@ class LampGrammarTests(unittest.TestCase):
         self.assertTrue(set(controls.LAMP) <= set(controls.DEVICE_ACTIONS) and set(controls.LAMP) <= set(controls.ACTIONS))
         self.assertEqual(FakeJev('device', 0.9, 'lamp_book').decide('make it cozy for reading')[0], Command('lamp_book'))
 
+    def test_instinct_description_can_be_replaced(self):
+        jev = FakeJev('instinct', 0.9)
+        jev.decide('what is due tomorrow')
+        self.assertIn(controls.INSTINCT, jev.sent['questions']['route']['criteria']['instinct'])
+        jev = FakeJev('instinct', 0.9, instinct='Instinct tracks my reading list.')
+        jev.decide('what is due tomorrow')
+        criteria = jev.sent['questions']['route']['criteria']['instinct']
+        self.assertIn('Instinct tracks my reading list.', criteria)
+        self.assertNotIn(controls.INSTINCT, criteria)
+
 
 class LampTests(unittest.TestCase):
+    def test_on_off_is_confirmed_as_asked(self):
+        cases = {'Turn on my lamp.': 'Turned on the lamp.', 'Turn the light off': 'Turned off the lamp.',
+                 'Lights out.': 'Turned off the lamp.', 'Toggle the lamp.': 'Toggled the lamp.'}
+        for said, reply in cases.items():
+            self.assertEqual(controls.lamp_reply('lamp_on_off', said), reply, said)
+        self.assertEqual(controls.lamp_reply('lamp_book', 'Turn on reading mode'), 'Reading light on.')
+
+    def test_goodnight_turns_the_lamp_off(self):
+        for said in ('Goodnight.', 'Good night, Clippy!', 'Night night'):
+            self.assertEqual(parse(said), Command('lamp_goodnight'), said)
+        self.assertIsNone(parse('Good night moon'))
+        self.assertEqual(controls.LAMP['lamp_goodnight'][0], 'on/off')
+
     def test_press_runs_send_with_the_button_name(self):
         calls = []
         def run(command, **kwargs):

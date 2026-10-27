@@ -321,6 +321,13 @@ class WhatsAppTests(unittest.TestCase):
         reply = self.client.wait_reply('ABC', 1000, time.time() + 5, threading.Event())
         self.assertEqual(reply, Reply('', ['V1']))
 
+    def test_voice_note_ends_the_wait_without_settling(self):
+        self.client.config['reply_settle_seconds'] = 3
+        FakeBridge.replies = [dict(seq=1, timestamp=1001, id='V1', text='', audio=True)]
+        started = time.monotonic()
+        self.client.wait_reply('ABC', 1000, time.time() + 10, threading.Event())
+        self.assertLess(time.monotonic() - started, 1)
+
     def test_without_speak_text_a_text_does_not_end_the_wait(self):
         self.client.config['speak_text'] = False
         FakeBridge.replies = [dict(seq=1, timestamp=1001, text='Job updates.'),

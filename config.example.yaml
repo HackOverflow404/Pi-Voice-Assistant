@@ -26,7 +26,10 @@ audio:
   # The same while a request is in progress or a reply is playing: the wake word interrupts
   # it, and the Echo's own voice is the background it must stand out from.
   barge_in_min_ratio: 1.5
-  # Keep the last five raw recordings in state/utterances for tuning. Off by default.
+  # A wake word scoring at least this but under wake_threshold is logged as a near miss.
+  wake_near_miss: 0.2
+  # Keep the last five raw recordings in state/utterances, and the audio around the last 200
+  # wake decisions (accepted, ignored, near misses) in state/wake, for tuning. Off by default.
   debug_save_utterances: false
 # Where spoken requests go: sms (a Google Voice number, through its Gmail account) or
 # whatsapp (the wa-bridge). Only the chosen section is used.
@@ -123,6 +126,17 @@ phone:
   ha_url: http://127.0.0.1:8123
   notify: mobile_app_lc_3          # the notify service, without "notify."
   tracker: device_tracker.lc_3
+mtd:
+  # Champaign-Urbana bus times from MTD's API v3 (https://mtd.dev; create an account there
+  # for a key). "When's the next bus" checks default_route at default_stop unless you name
+  # others; "which bus should I take to Target" plans direct trips from default_stop or any
+  # stop within nearby_meters of it. Empty api_key: not set up.
+  api_key: ""
+  default_stop: Campus Circle      # a stop name as MTD writes it, or a stop ID like IU
+  default_route: "22"              # a route number or name; 22 covers the Illini and Illini Limited, 22 and 220
+  nearby_meters: 400               # starting stops a short walk from default_stop
+  destination_meters: 400          # stops this close to the destination count as getting there
+  max_options: 2                   # trips offered for "which bus should I take"
 jev:
   # Optional. TypeSafe's Jev routes what the grammar doesn't recognize: a request for
   # Instinct, a device command, a cancellation, or an accidental trigger. The transcript
@@ -131,6 +145,10 @@ jev:
   # Below this probability Jev's answer is not trusted and the request goes to Instinct.
   min_probability: 0.6
   timeout_seconds: 3
+  # What Instinct can do, so Jev routes those requests to it. Empty: the built-in description
+  # (controls.INSTINCT): schedule, coursework, to-do list, job applications, email, texts, notes,
+  # groceries, and anything that needs knowledge or a web search.
+  instinct: ""
 calendar:
   # Private iCal addresses shown on the dashboard. Google Calendar: Settings -> your
   # calendar -> Integrate calendar -> "Secret address in iCal format". Anyone with the
