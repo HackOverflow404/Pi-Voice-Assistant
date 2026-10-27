@@ -65,6 +65,8 @@ class Hub:
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='clippy-voice-assistant')
         self.client.will_set(AVAILABILITY, 'offline', retain=True)
         self.client.on_connect, self.client.on_message = self._on_connect, self._on_message
+        if config.get('username'):
+            self.client.username_pw_set(config['username'], config.get('password'))
         self.client.connect_async(config['host'], config.get('port', 1883), keepalive=30)
         self.client.loop_start()
 

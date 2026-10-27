@@ -680,7 +680,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_lamp_without_config_says_so(self):
         await self.say('Turn the lamp on.')
         await self.until('audio_start')
-        self.assertEqual(self.session.reply, "The lamp isn't set up yet.")
+        self.assertEqual(self.session.reply, "Luxo Junior isn't set up yet.")
         self.assertEqual(self.sent, [])
 
     async def test_jev_can_discard_an_accidental_trigger(self):

@@ -772,7 +772,7 @@ class Session:
                 self.reply = 'Pairing mode is off.'
             elif command.action in controls.LAMP:
                 if not self.lamp:
-                    self.reply = "The lamp isn't set up yet."
+                    self.reply = "Luxo Junior isn't set up yet."
                 else:
                     await self.blocking(self.lamp.press, command.action)
                     self.reply = controls.lamp_reply(command.action, self.transcript)

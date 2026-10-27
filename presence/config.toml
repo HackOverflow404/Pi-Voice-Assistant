@@ -11,6 +11,9 @@ keyframes_only = false          # true: ~1 fps, nearly free to decode, but zone 
 [mqtt]
 host = "127.0.0.1"
 port = 1883
+# The broker's login (keep this file mode 600 once filled in).
+username = ""
+password = ""
 
 [presence]
 face_hz = 5                     # face detection rate (~18 ms each on a Pi 4)

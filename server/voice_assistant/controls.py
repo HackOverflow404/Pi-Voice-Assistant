@@ -1,5 +1,5 @@
 """Spoken device commands: the Echo's Bluetooth pairing and system (media) and assistant
-voice volumes, the RF desk lamp (through its remote, wired to the Pi; see rf-lamp), and
+voice volumes, Luxo Jr. the RF floor lamp (through its remote, wired to the Pi; see rf-lamp), and
 finding the user's phone (a Home Assistant critical alert to the Companion app).
 
 Every transcript is routed one of four ways: a device command (handled here, never sent),
@@ -23,8 +23,8 @@ from . import skills
 # The lamp can't report its state, so on/off is one toggle button; lamp_reply confirms it in
 # the words the user asked with.
 LAMP = {
-    'lamp_on_off': ('on/off', 'Turn the desk lamp on or off (one toggle button).', 'Toggled the lamp.'),
-    'lamp_timer': ('1h', "Start the lamp's one-hour auto-off timer.", 'The lamp will turn off in an hour.'),
+    'lamp_on_off': ('on/off', 'Turn Luxo Jr., the floor lamp, on or off (one toggle button).', 'Toggled Luxo Junior.'),
+    'lamp_timer': ('1h', "Start the lamp's one-hour auto-off timer.", 'Luxo Junior will turn off in an hour.'),
     'lamp_brighter': ('brightness up', 'Make the lamp brighter.', 'Lamp brighter.'),
     'lamp_dimmer': ('brightness down', 'Make the lamp dimmer.', 'Lamp dimmer.'),
     'lamp_warmer': ('warmth up', "Make the lamp's light warmer, more yellow.", 'Lamp warmer.'),
@@ -36,7 +36,7 @@ LAMP = {
     'lamp_book': ('book', "Set the lamp to its reading (book) preset.", 'Reading light on.'),
     'lamp_laptop': ('laptop', "Set the lamp to its laptop or screen-work preset.", 'Lamp on laptop mode.'),
     'lamp_goodnight': ('on/off', 'Saying goodnight or going to sleep: turn the lamp off for the night.',
-                       'Goodnight! Turned off the lamp.'),
+                       'Goodnight! Turned off Luxo Junior.'),
 }
 ACTIONS = ('pairing_on', 'pairing_off', 'system_up', 'system_down', 'system_set',
            'ai_up', 'ai_down', 'ai_set', 'phone_ping', *LAMP)
@@ -140,7 +140,8 @@ def target_of(word):
     return 'ai' if word and re.fullmatch(AI, word) else 'system'
 
 
-LAMP_WORD = r'(?:the |my |desk )*(?:lamp|light|lights)'
+# Luxo Jr. is the lamp's name ("turn on Luxo", "Luxo Junior brighter").
+LAMP_WORD = r'(?:the |my |floor |desk )*(?:lamp|light|lights|lux ?o(?: jr| junior)?)'
 # What speech recognition makes of "lamp" on the Echo's narrowband microphone (seen in the logs:
 # "turn on my lap", "turn on my load", "turn off my laptop"). Only accepted after "turn on/off my",
 # where nothing else this speaker controls would fit.
@@ -182,9 +183,9 @@ def lamp_reply(action, text):
     if action == 'lamp_on_off':
         said = normalize(text)
         if re.search(r'\b(?:off|out)\b', said):
-            return 'Turned off the lamp.'
+            return 'Turned off Luxo Junior.'
         if re.search(r'\bon\b', said):
-            return 'Turned on the lamp.'
+            return 'Turned on Luxo Junior.'
     return LAMP[action][2]
 
 
@@ -246,7 +247,7 @@ def parse(text):
 
 CONTEXT = ('Speech-to-text of what a microphone on an Echo Show speaker picked up just after it heard '
            'something like its wake word "Hey Clippy". The speaker is a university student\'s desk '
-           'assistant: it handles a few things itself (the lamp, volume, timers, finding the phone, the '
+           'assistant: it handles a few things itself (Luxo Jr. the floor lamp, volume, timers, finding the phone, the '
            'time and weather, and MTD bus times and which bus to take) and '
            'passes everything else to Instinct, the student\'s personal AI assistant. The microphone hears '
            'the whole room, and the wake word sometimes fires by mistake on similar-sounding speech, TV or '
@@ -306,7 +307,7 @@ ROUTES = {
                 'Instinct just asked, or more details, context or a correction for a recent request, even '
                 'with no request of its own.',
     'device': 'Something this speaker does itself, asked for or instructed rather than merely mentioned: '
-              'Bluetooth pairing mode or volume; the desk lamp (on or '
+              'Bluetooth pairing mode or volume; Luxo Jr., the floor lamp (on or '
               'off, brighter, dimmer, warmer, cooler, a one-hour timer, or presets like sun, night, milk, '
               'reading and laptop); ringing the user\'s phone to find it; setting, pausing, '
               'resuming, cancelling or checking a timer; starting, pausing, stopping or checking a '
@@ -456,7 +457,7 @@ def recent_exchange(request, now):
     return text
 
 
-# ---------------------------------------------------------------- the desk lamp
+# ---------------------------------------------------------------- Luxo Jr. (the floor lamp)
 
 class Lamp:
     """Presses the lamp's remote buttons by running rf-lamp's send.py, which drives the

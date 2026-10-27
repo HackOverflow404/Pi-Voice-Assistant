@@ -148,7 +148,8 @@ class LampGrammarTests(unittest.TestCase):
                  'Turn the lamp off in an hour': 'lamp_timer', 'Set a one hour lamp timer': 'lamp_timer',
                  'Set the lamp to book mode': 'lamp_book', 'Reading light': 'lamp_book', 'Night light': 'lamp_night',
                  'Lamp to sun': 'lamp_sun', 'Set the light to laptop mode': 'lamp_laptop', 'K mode': 'lamp_k',
-                 'Milk mode on the lamp': 'lamp_milk'}
+                 'Milk mode on the lamp': 'lamp_milk', 'Turn on Luxo Jr.': 'lamp_on_off',
+                 'Make Luxo Junior brighter': 'lamp_brighter', 'Set Luxo to night mode': 'lamp_night'}
         for said, action in cases.items():
             self.assertEqual(parse(said), Command(action), said)
 
@@ -186,8 +187,9 @@ class LampGrammarTests(unittest.TestCase):
 
 class LampTests(unittest.TestCase):
     def test_on_off_is_confirmed_as_asked(self):
-        cases = {'Turn on my lamp.': 'Turned on the lamp.', 'Turn the light off': 'Turned off the lamp.',
-                 'Lights out.': 'Turned off the lamp.', 'Toggle the lamp.': 'Toggled the lamp.'}
+        cases = {'Turn on my lamp.': 'Turned on Luxo Junior.', 'Turn the light off': 'Turned off Luxo Junior.',
+                 'Lights out.': 'Turned off Luxo Junior.', 'Toggle the lamp.': 'Toggled Luxo Junior.',
+                 'Turn on Luxo Jr.': 'Turned on Luxo Junior.', 'Turn off Luxo': 'Turned off Luxo Junior.'}
         for said, reply in cases.items():
             self.assertEqual(controls.lamp_reply('lamp_on_off', said), reply, said)
         self.assertEqual(controls.lamp_reply('lamp_book', 'Turn on reading mode'), 'Reading light on.')

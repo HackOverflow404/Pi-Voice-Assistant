@@ -175,6 +175,8 @@ class Publisher:
         self.client.on_message = self._on_message
         self.zone = None
         self.handlers = {}
+        if config.get('username'):
+            self.client.username_pw_set(config['username'], config.get('password'))
         self.client.connect_async(config.get('host', '127.0.0.1'), config.get('port', 1883), keepalive=30)
         self.client.loop_start()
 

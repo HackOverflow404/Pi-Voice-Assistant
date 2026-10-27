@@ -325,7 +325,7 @@ After the wake word, a few phrases control the Echo itself instead of going to I
 - **Assistant voice volume:** "turn up your volume", "speak louder", "set your volume to 40 percent".
   This replaces `tts.speech_volume` and is kept in `state/controls.json` across restarts.
 
-- **Desk lamp:** "turn the lamp on/off" (the lamp has one toggle button, so both toggle it),
+- **Luxo Jr. (the floor lamp):** "turn the lamp on/off" or "turn on Luxo" (the lamp has one toggle button, so both toggle it),
   "make the lamp brighter/dimmer/warmer/cooler", "turn the lamp off in an hour", and its presets:
   "sun mode", "night light", "milk mode", "reading light" or "book mode", "laptop mode", "K mode".
   The Pi presses the lamp remote's buttons through the rf-lamp project's `send.py`, set in

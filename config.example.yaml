@@ -102,7 +102,7 @@ stt:
   # Names and jargon you say that get misheard: people, places, course codes, shows. Nova-3
   # favours these spellings (keyterm prompting, up to 100); Whisper gets them as hotwords.
   # Keep it to words that actually go wrong: every term nudges similar-sounding speech toward it.
-  keyterms: [Clippy, Instinct]
+  keyterms: [Clippy, Instinct, Luxo Jr.]
 echo:
   # adb serial of the Echo attached to the Pi by USB; null uses the only attached device.
   adb_serial: null
@@ -113,8 +113,11 @@ mqtt:
   # and reply, Echo connection, voice and speaker volume, pairing buttons). Empty: off.
   host: ""
   port: 1883
+  # The broker's login for Clippy (Mainframe's broker refuses anonymous clients).
+  username: ""
+  password: ""
 lamp:
-  # The RF desk lamp, pressed through its remote wired to this Pi (the rf-lamp project).
+  # Luxo Jr., the RF floor lamp, pressed through its remote wired to this Pi (the rf-lamp project).
   # Run with the system Python, which has pigpio. Empty: lamp commands say it isn't set up.
   command: []
   # command: [/usr/bin/python3, /home/user/rf-lamp/send.py]
